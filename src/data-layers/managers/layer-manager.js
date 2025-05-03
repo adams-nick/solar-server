@@ -121,7 +121,15 @@ class LayerManager {
           return this.createSyntheticResult(layerType, location, options);
         }
 
-        throw fetchError;
+        // If fallbackToSynthetic is false, propagate the error with enhanced context
+        const enhancedError = new Error(
+          `Failed to fetch ${layerType} data: ${fetchError.message}`
+        );
+        enhancedError.originalError = fetchError;
+        enhancedError.layerType = layerType;
+        enhancedError.location = location;
+        enhancedError.operationId = operationId;
+        throw enhancedError;
       }
 
       // Process the data
@@ -148,7 +156,15 @@ class LayerManager {
           return this.createSyntheticResult(layerType, location, options);
         }
 
-        throw processError;
+        // If fallbackToSynthetic is false, propagate the error with additional context
+        const enhancedError = new Error(
+          `Failed to process ${layerType} data: ${processError.message}`
+        );
+        enhancedError.originalError = processError;
+        enhancedError.layerType = layerType;
+        enhancedError.location = location;
+        enhancedError.operationId = operationId;
+        throw enhancedError;
       }
 
       // Create visualization
@@ -175,7 +191,15 @@ class LayerManager {
           return this.createSyntheticResult(layerType, location, options);
         }
 
-        throw visualizeError;
+        // If fallbackToSynthetic is false, propagate the error
+        const enhancedError = new Error(
+          `Failed to create visualization for ${layerType}: ${visualizeError.message}`
+        );
+        enhancedError.originalError = visualizeError;
+        enhancedError.layerType = layerType;
+        enhancedError.location = location;
+        enhancedError.operationId = operationId;
+        throw enhancedError;
       }
 
       // Create the result object

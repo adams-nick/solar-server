@@ -61,12 +61,13 @@ class MonthlyFluxFetcher extends Fetcher {
       }
 
       // Format parameters for Google Solar API
-      const params = this.formatSolarApiParams(
-        location,
-        radius,
-        quality,
-        apiKey
-      );
+      const params = new URLSearchParams({
+        "location.latitude": location.latitude.toFixed(5),
+        "location.longitude": location.longitude.toFixed(5),
+        radius_meters: radius.toString(),
+        required_quality: quality,
+        key: apiKey,
+      });
 
       // Log the request (with API key masked)
       console.log(
@@ -75,12 +76,21 @@ class MonthlyFluxFetcher extends Fetcher {
           .replace(/key=[^&]+/, "key=*****")}`
       );
 
-      // Make request to Google Solar API
+      // Make request to Google Solar API - using direct axios call
       let response;
       try {
-        response = await this.fetchWithRetry(
-          `https://solar.googleapis.com/v1/dataLayers:get?${params}`,
-          { responseType: "json" }
+        response = await this.apiClient.get(
+          `https://solar.googleapis.com/v1/dataLayers:get?${params}`
+        );
+
+        // Log response status and structure
+        console.log(
+          `[MonthlyFluxFetcher] API response status: ${response.status}`
+        );
+        console.log(
+          `[MonthlyFluxFetcher] API response structure: ${JSON.stringify(
+            Object.keys(response.data)
+          )}`
         );
       } catch (error) {
         console.error(
@@ -89,12 +99,16 @@ class MonthlyFluxFetcher extends Fetcher {
         throw new Error(`Failed to fetch data layers: ${error.message}`);
       }
 
-      // Extract monthly flux URL
-      const { monthlyFluxUrl, maskUrl, imageryQuality } = response;
+      // Extract monthly flux URL and mask URL
+      const { monthlyFluxUrl, maskUrl, imageryQuality } = response.data;
 
+      // Validate URLs
       if (!monthlyFluxUrl) {
         console.error(
           "[MonthlyFluxFetcher] Monthly flux URL not found in Solar API response"
+        );
+        console.log(
+          `[MonthlyFluxFetcher] API response: ${JSON.stringify(response.data)}`
         );
         throw new Error("Monthly flux URL not found in API response");
       }
@@ -102,56 +116,90 @@ class MonthlyFluxFetcher extends Fetcher {
       console.log(
         `[MonthlyFluxFetcher] Successfully retrieved monthly flux URL from Solar API`
       );
+      console.log(`[MonthlyFluxFetcher] Monthly Flux URL: ${monthlyFluxUrl}`);
+      console.log(`[MonthlyFluxFetcher] Mask URL: ${maskUrl}`);
       console.log(
         `[MonthlyFluxFetcher] Imagery quality: ${imageryQuality || "unknown"}`
       );
 
       // Download the monthly flux data
+      let monthlyFluxData;
       try {
-        const monthlyFluxData = await this.downloadRawData(
-          monthlyFluxUrl,
-          apiKey
+        // Ensure the URL includes the API key
+        const fluxUrl = monthlyFluxUrl.includes("?")
+          ? `${monthlyFluxUrl}&key=${apiKey}`
+          : `${monthlyFluxUrl}?key=${apiKey}`;
+
+        console.log(
+          `[MonthlyFluxFetcher] Downloading monthly flux data from: ${fluxUrl.replace(
+            /key=[^&]+/,
+            "key=*****"
+          )}`
         );
+
+        // Use direct axios call
+        const fluxResponse = await this.apiClient.get(fluxUrl, {
+          responseType: "arraybuffer",
+        });
+
+        monthlyFluxData = fluxResponse.data;
         console.log(
           `[MonthlyFluxFetcher] Successfully downloaded monthly flux data: ${monthlyFluxData.byteLength} bytes`
         );
-
-        // If mask data is also requested, download it
-        let maskData = null;
-        if (fetchMask && maskUrl) {
-          try {
-            console.log("[MonthlyFluxFetcher] Fetching associated mask data");
-            maskData = await this.downloadRawData(maskUrl, apiKey);
-            console.log(
-              `[MonthlyFluxFetcher] Successfully downloaded mask data: ${maskData.byteLength} bytes`
-            );
-          } catch (maskError) {
-            console.warn(
-              `[MonthlyFluxFetcher] Failed to download mask data: ${maskError.message}`
-            );
-            // Continue without mask data
-          }
-        }
-
-        // Return both the monthly flux data and additional information
-        return {
-          monthlyFluxData,
-          maskData,
-          metadata: {
-            imageryQuality,
-            imageryDate: response.imageryDate,
-            imageryProcessedDate: response.imageryProcessedDate,
-            location,
-          },
-        };
-      } catch (error) {
+      } catch (fluxError) {
         console.error(
-          `[MonthlyFluxFetcher] Error downloading monthly flux data: ${error.message}`
+          `[MonthlyFluxFetcher] Error downloading monthly flux data: ${fluxError.message}`
         );
         throw new Error(
-          `Failed to download monthly flux data: ${error.message}`
+          `Failed to download monthly flux data: ${fluxError.message}`
         );
       }
+
+      // Download mask data if requested
+      let maskData = null;
+      if (fetchMask && maskUrl) {
+        try {
+          console.log("[MonthlyFluxFetcher] Fetching associated mask data");
+
+          // Ensure the URL includes the API key
+          const maskUrlWithKey = maskUrl.includes("?")
+            ? `${maskUrl}&key=${apiKey}`
+            : `${maskUrl}?key=${apiKey}`;
+
+          console.log(
+            `[MonthlyFluxFetcher] Downloading mask data from: ${maskUrlWithKey.replace(
+              /key=[^&]+/,
+              "key=*****"
+            )}`
+          );
+
+          const maskResponse = await this.apiClient.get(maskUrlWithKey, {
+            responseType: "arraybuffer",
+          });
+
+          maskData = maskResponse.data;
+          console.log(
+            `[MonthlyFluxFetcher] Successfully downloaded mask data: ${maskData.byteLength} bytes`
+          );
+        } catch (maskError) {
+          console.warn(
+            `[MonthlyFluxFetcher] Failed to download mask data: ${maskError.message}`
+          );
+          // Continue without mask data
+        }
+      }
+
+      // Return both the monthly flux data and additional information
+      return {
+        monthlyFluxData,
+        maskData,
+        metadata: {
+          imageryQuality,
+          imageryDate: response.data.imageryDate,
+          imageryProcessedDate: response.data.imageryProcessedDate,
+          location,
+        },
+      };
     } catch (error) {
       console.error(
         `[MonthlyFluxFetcher] Error in fetch operation: ${error.message}`

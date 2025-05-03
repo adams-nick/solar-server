@@ -106,21 +106,39 @@ class Fetcher {
           console.log(`[Fetcher] Fetching URL: ${this.maskSensitiveUrl(url)}`);
         }
 
-        // Make the request
+        // Make the request - use the client's get method directly
         const response = await this.apiClient.get(url, {
           responseType,
           timeout,
+          ...options,
         });
 
         // Check response
+        if (!response || !response.status) {
+          throw new Error(`Invalid response received`);
+        }
+
         if (response.status !== 200) {
           throw new Error(`Request failed with status: ${response.status}`);
         }
 
+        // Log success
         console.log(
           `[Fetcher] Successfully fetched URL: ${this.maskSensitiveUrl(url)}`
         );
-        return response.data;
+
+        // Ensure the data property exists
+        if (!response.data && response.status === 200) {
+          console.warn(`[Fetcher] Response has status 200 but no data`);
+          // Create a default response with the status but empty data
+          return {
+            status: response.status,
+            headers: response.headers,
+            data: Buffer.alloc(0), // Empty buffer
+          };
+        }
+
+        return response;
       } catch (error) {
         attempt++;
         lastError = error;
@@ -180,17 +198,86 @@ class Fetcher {
           : `${url}?key=${apiKey}`
         : url;
 
-      // Use the retry logic to download
-      const data = await this.fetchWithRetry(fullUrl, options);
+      // Use the retry logic to download with explicit responseType
+      const fetchOptions = {
+        ...options,
+        responseType: options.responseType || "arraybuffer",
+      };
 
-      if (!data) {
-        throw new Error("Received empty data from URL");
+      // Make the request with retry logic
+      const response = await this.fetchWithRetry(fullUrl, fetchOptions);
+
+      // Detailed logging of what we received
+      console.log(`[Fetcher] Response status: ${response.status}`);
+      if (response.headers) {
+        console.log(
+          `[Fetcher] Response headers: ${JSON.stringify(response.headers)}`
+        );
       }
 
-      console.log(`[Fetcher] Successfully downloaded ${data.byteLength} bytes`);
-      return data;
+      // Safety check for data
+      if (!response.data) {
+        console.warn(`[Fetcher] Response has no data property`);
+        throw new Error("Received empty response from URL");
+      }
+
+      const dataSize =
+        response.data instanceof Buffer || response.data instanceof ArrayBuffer
+          ? response.data.byteLength
+          : typeof response.data === "string"
+          ? response.data.length
+          : "unknown";
+      console.log(`[Fetcher] Response data size: ${dataSize} bytes`);
+
+      // If data is empty but status is 200, this might be a valid empty response
+      if (
+        (response.data instanceof Buffer ||
+          response.data instanceof ArrayBuffer) &&
+        response.data.byteLength === 0
+      ) {
+        console.warn(
+          `[Fetcher] Received zero-length data with status ${response.status}`
+        );
+        throw new Error(
+          `Google Solar API returned empty data for this location`
+        );
+      }
+
+      // Convert to Buffer if not already
+      let buffer;
+      if (response.data instanceof Buffer) {
+        buffer = response.data;
+      } else if (response.data instanceof ArrayBuffer) {
+        buffer = Buffer.from(response.data);
+      } else if (
+        typeof response.data === "object" &&
+        response.data.type === "Buffer" &&
+        Array.isArray(response.data.data)
+      ) {
+        buffer = Buffer.from(response.data.data);
+      } else {
+        buffer = Buffer.from(response.data);
+      }
+
+      console.log(
+        `[Fetcher] Successfully downloaded ${
+          buffer.byteLength
+        } bytes, Buffer: ${buffer instanceof Buffer}`
+      );
+      return buffer;
     } catch (error) {
       console.error(`[Fetcher] Error downloading data: ${error.message}`);
+
+      // Enhance error message to indicate data might not be available
+      if (
+        error.message.includes("empty") ||
+        error.message.includes("zero-length")
+      ) {
+        throw new Error(
+          `Data not available for this location: ${error.message}`
+        );
+      }
+
       throw new Error(`Failed to download data: ${error.message}`);
     }
   }

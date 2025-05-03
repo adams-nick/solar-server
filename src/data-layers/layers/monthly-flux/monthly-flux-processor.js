@@ -59,18 +59,41 @@ class MonthlyFluxProcessor extends Processor {
           (rawData.monthlyFluxData || rawData.fluxBuffer);
 
         // Extract buffers from object or use raw buffer directly
-        const fluxBuffer = isRawObject
-          ? rawData.monthlyFluxData || rawData.fluxBuffer
-          : rawData;
-        const maskBuffer = isRawObject
-          ? rawData.maskData || rawData.maskBuffer
-          : null;
-        const fetcherMetadata = isRawObject ? rawData.metadata || {} : {};
+        let fluxBuffer, maskBuffer, fetcherMetadata;
+
+        if (isRawObject) {
+          // Data is an object with embedded buffers and metadata
+          fluxBuffer = rawData.monthlyFluxData || rawData.fluxBuffer;
+          maskBuffer = rawData.maskData || rawData.maskBuffer;
+          fetcherMetadata = rawData.metadata || {};
+
+          console.log(
+            `[MonthlyFluxProcessor] Received data object with flux buffer (${
+              fluxBuffer ? "present" : "missing"
+            }) and mask buffer (${maskBuffer ? "present" : "missing"})`
+          );
+        } else {
+          // Direct buffer (although this case may not handle mask data)
+          fluxBuffer = rawData;
+          maskBuffer = null;
+          fetcherMetadata = {};
+
+          console.log(`[MonthlyFluxProcessor] Received direct buffer data`);
+        }
 
         // Validate flux buffer
         if (!fluxBuffer) {
           throw new Error("Monthly flux data buffer is required");
         }
+
+        // Log buffer details
+        console.log(
+          `[MonthlyFluxProcessor] Flux buffer type: ${typeof fluxBuffer}, length: ${
+            fluxBuffer.byteLength || fluxBuffer.length || "unknown"
+          }`
+        );
+
+        // Ensure buffer is in the correct format
         this.validateRawData(fluxBuffer);
 
         // Set default options

@@ -38,12 +38,35 @@ class GeoTiffProcessor {
    * @param {Object} options - Processing options
    * @returns {Promise<Object>} - Processed GeoTIFF data
    */
+  /**
+   * Process GeoTIFF buffer using geotiff.js library
+   * @private
+   * @param {Buffer} buffer - The GeoTIFF buffer
+   * @param {Object} options - Processing options
+   * @returns {Promise<Object>} - Processed GeoTIFF data
+   */
   async processWithGeotiff(buffer, options = {}) {
     try {
       console.log("Processing GeoTIFF with geotiff.js library");
 
+      // Ensure buffer is an ArrayBuffer
+      let arrayBuffer;
+      if (buffer instanceof Buffer) {
+        // Convert Node.js Buffer to ArrayBuffer
+        arrayBuffer = buffer.buffer.slice(
+          buffer.byteOffset,
+          buffer.byteOffset + buffer.byteLength
+        );
+      } else if (buffer instanceof ArrayBuffer) {
+        arrayBuffer = buffer;
+      } else if (buffer instanceof Uint8Array) {
+        arrayBuffer = buffer.buffer;
+      } else {
+        throw new Error(`Unsupported buffer type: ${typeof buffer}`);
+      }
+
       // Parse the GeoTIFF
-      const tiff = await geotiff.fromArrayBuffer(buffer);
+      const tiff = await geotiff.fromArrayBuffer(arrayBuffer);
 
       // Get the image (for multi-page TIFFs, can specify page)
       const image = await tiff.getImage(options.page || 0);

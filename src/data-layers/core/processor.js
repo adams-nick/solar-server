@@ -66,17 +66,37 @@ class Processor {
    * @param {Object} options - Validation options
    * @throws {Error} if validation fails
    */
+  /**
+   * Validate raw data before processing
+   * @protected
+   * @param {Buffer} rawData - Raw data to validate
+   * @param {Object} options - Validation options
+   * @throws {Error} if validation fails
+   */
   validateRawData(rawData, options = {}) {
     if (!rawData) {
       throw new Error("Raw data is required for processing");
     }
+
+    // Log the type of the raw data for debugging
+    console.log(
+      `[Processor] Raw data type: ${typeof rawData}, instanceof Buffer: ${
+        rawData instanceof Buffer
+      }, instanceof ArrayBuffer: ${
+        rawData instanceof ArrayBuffer
+      }, instanceof Uint8Array: ${rawData instanceof Uint8Array}, byteLength: ${
+        rawData.byteLength || "N/A"
+      }`
+    );
 
     if (
       !(rawData instanceof Buffer) &&
       !(rawData instanceof ArrayBuffer) &&
       !(rawData instanceof Uint8Array)
     ) {
-      throw new Error("Raw data must be a Buffer, ArrayBuffer, or Uint8Array");
+      throw new Error(
+        `Raw data must be a Buffer, ArrayBuffer, or Uint8Array, got: ${typeof rawData}`
+      );
     }
 
     if (rawData.byteLength === 0) {
