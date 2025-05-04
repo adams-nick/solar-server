@@ -2,7 +2,7 @@
  * Annual flux layer processor for SolarScanner data-layers module
  *
  * Processes raw annual flux layer data from GeoTIFF format into a structured
- * representation of the yearly solar potential.
+ * representation, showing solar potential across the entire year.
  */
 
 const Processor = require("../../core/processor");
@@ -36,13 +36,13 @@ class AnnualFluxProcessor extends Processor {
   /**
    * Process raw annual flux data
    * @param {Object} rawData - The raw data object containing annual flux data and optional mask data
-   * @param {Buffer} rawData.annualFluxData - The raw annual flux data buffer
+   * @param {Buffer} rawData.fluxData - The raw annual flux data buffer
    * @param {Buffer} [rawData.maskData] - The raw mask data buffer (optional)
    * @param {Object} [rawData.metadata] - Additional metadata from the fetcher
    * @param {Object} options - Processing options
    * @param {boolean} [options.useMask=true] - Whether to use mask data if available
    * @param {number} [options.buildingMargin=20] - Margin to add around building boundaries
-   * @param {boolean} [options.calculateStatistics=true] - Whether to calculate statistics for the data
+   * @param {boolean} [options.calculateStatistics=true] - Whether to calculate statistics
    * @returns {Promise<Object>} - Processed annual flux data
    * @throws {Error} if processing fails
    */
@@ -55,15 +55,15 @@ class AnnualFluxProcessor extends Processor {
         const isRawObject =
           rawData &&
           typeof rawData === "object" &&
-          (rawData.annualFluxData || rawData.fluxBuffer);
+          (rawData.fluxData || rawData.annualFluxData);
 
         // Extract buffers from object or use raw buffer directly
         let fluxBuffer, maskBuffer, fetcherMetadata;
 
         if (isRawObject) {
           // Data is an object with embedded buffers and metadata
-          fluxBuffer = rawData.annualFluxData || rawData.fluxBuffer;
-          maskBuffer = rawData.maskData || rawData.maskBuffer;
+          fluxBuffer = rawData.fluxData || rawData.annualFluxData;
+          maskBuffer = rawData.maskData;
           fetcherMetadata = rawData.metadata || {};
 
           console.log(
@@ -108,7 +108,6 @@ class AnnualFluxProcessor extends Processor {
             fluxBuffer,
             {
               convertToArray: true,
-              // Annual flux is typically a single band
             }
           );
 
@@ -128,13 +127,16 @@ class AnnualFluxProcessor extends Processor {
           bounds,
         } = processedFluxGeoTiff;
 
-        // Annual flux data typically has a single band
-        if (fluxRasters.length === 0) {
-          throw new Error("No raster data found in annual flux GeoTIFF");
+        // Get the primary flux raster (should be the only one for annual flux)
+        if (fluxRasters.length !== 1) {
+          console.warn(
+            `[AnnualFluxProcessor] Expected 1 band for annual flux data, but found ${fluxRasters.length}`
+          );
         }
 
-        // Use the first raster as the annual flux data
-        const annualFluxRaster = fluxRasters[0];
+        const fluxRaster = fluxRasters[0];
+        const width = fluxMetadata.width;
+        const height = fluxMetadata.height;
 
         // Process mask data if available
         let maskRaster = null;
@@ -157,38 +159,54 @@ class AnnualFluxProcessor extends Processor {
               processedMaskGeoTiff;
 
             if (
-              maskMetadata.width !== fluxMetadata.width ||
-              maskMetadata.height !== fluxMetadata.height
+              maskMetadata.width !== width ||
+              maskMetadata.height !== height
             ) {
               console.warn(
-                "[AnnualFluxProcessor] Mask and flux dimensions do not match. Mask will not be applied."
+                `[AnnualFluxProcessor] Mask and flux dimensions do not match. Mask: ${maskMetadata.width}x${maskMetadata.height}, Flux: ${width}x${height}. Attempting to resize.`
               );
+
+              // Simple resizing - this is a basic approach that could be improved
+              const resizedMask = this.resizeMask(
+                maskRasters[0],
+                maskMetadata.width,
+                maskMetadata.height,
+                width,
+                height
+              );
+
+              maskRaster = resizedMask;
             } else {
               maskRaster = maskRasters[0];
+            }
 
-              // Extract building boundaries
-              try {
-                buildingBoundaries = VisualizationUtils.findBuildingBoundaries(
-                  maskRaster,
-                  maskMetadata.width,
-                  maskMetadata.height,
-                  { margin: buildingMargin }
+            // Output mask statistics for debugging
+            const maskStats = this.calculateMaskStatistics(maskRaster);
+            console.log("[AnnualFluxProcessor] Mask statistics:", maskStats);
+
+            // Extract building boundaries
+            try {
+              buildingBoundaries = VisualizationUtils.findBuildingBoundaries(
+                maskRaster,
+                width,
+                height,
+                { margin: buildingMargin }
+              );
+
+              if (buildingBoundaries.hasBuilding) {
+                console.log(
+                  `[AnnualFluxProcessor] Found building boundaries: (${buildingBoundaries.minX},${buildingBoundaries.minY}) to (${buildingBoundaries.maxX},${buildingBoundaries.maxY})`
                 );
-
-                if (buildingBoundaries.hasBuilding) {
-                  console.log(
-                    `[AnnualFluxProcessor] Found building boundaries: (${buildingBoundaries.minX},${buildingBoundaries.minY}) to (${buildingBoundaries.maxX},${buildingBoundaries.maxY})`
-                  );
-                } else {
-                  console.warn(
-                    "[AnnualFluxProcessor] No building found in mask data"
-                  );
-                }
-              } catch (error) {
-                console.error(
-                  `[AnnualFluxProcessor] Error finding building boundaries: ${error.message}`
+              } else {
+                console.warn(
+                  "[AnnualFluxProcessor] No building found in mask data"
                 );
               }
+            } catch (error) {
+              console.error(
+                `[AnnualFluxProcessor] Error finding building boundaries: ${error.message}`
+              );
+              // Continue without building boundaries
             }
           } catch (error) {
             console.warn(
@@ -198,71 +216,61 @@ class AnnualFluxProcessor extends Processor {
           }
         }
 
-        // Apply mask if available
-        let maskedFluxRaster = annualFluxRaster;
+        // Apply mask to flux data if available
+        let maskedFluxRaster = fluxRaster;
+
         if (maskRaster) {
-          try {
-            maskedFluxRaster = this.applyMask(
-              annualFluxRaster,
-              maskRaster,
-              fluxMetadata.width,
-              fluxMetadata.height
-            );
-            console.log(
-              "[AnnualFluxProcessor] Applied mask to annual flux data"
-            );
-          } catch (error) {
-            console.warn(
-              `[AnnualFluxProcessor] Failed to apply mask: ${error.message}`
-            );
-            // Continue with unmasked data
-          }
+          maskedFluxRaster = this.applyMask(
+            fluxRaster,
+            maskRaster,
+            width,
+            height
+          );
+          console.log("[AnnualFluxProcessor] Applied mask to annual flux data");
+
+          // Debug: Check how many pixels were masked
+          const maskedPixelCount = maskedFluxRaster.filter(
+            (val) => val === config.processing.NO_DATA_VALUE
+          ).length;
+
+          console.log(
+            `[AnnualFluxProcessor] Masked ${maskedPixelCount} pixels out of ${maskedFluxRaster.length}`
+          );
         }
 
         // Calculate statistics if requested
         let statistics = null;
-        const noDataValue = config.processing.NO_DATA_VALUE;
-
         if (calculateStatistics) {
-          try {
-            // Find data range
-            const dataRange = this.findDataRange(maskedFluxRaster, noDataValue);
-
-            // Calculate additional statistics
-            statistics = this.calculateStatistics(maskedFluxRaster, dataRange);
-
-            console.log(
-              `[AnnualFluxProcessor] Calculated statistics: min=${
-                statistics.min
-              }, max=${statistics.max}, avg=${statistics.avg.toFixed(2)}`
-            );
-          } catch (error) {
-            console.warn(
-              `[AnnualFluxProcessor] Failed to calculate statistics: ${error.message}`
-            );
-            // Continue without statistics
-          }
+          statistics = this.calculateStatistics(maskedFluxRaster);
+          console.log(
+            `[AnnualFluxProcessor] Calculated statistics: min=${statistics.min}, max=${statistics.max}, avg=${statistics.avg}`
+          );
         }
 
-        // Create the result object
+        // Create the result object with clear property naming
         const result = {
           layerType: "annualFlux",
           metadata: {
+            dimensions: {
+              width,
+              height,
+            },
             ...fluxMetadata,
             ...fetcherMetadata,
-            dimensions: {
-              width: fluxMetadata.width,
-              height: fluxMetadata.height,
-            },
-            hasMask: !!maskRaster,
-            noDataValue,
-            statistics,
           },
+          // Explicitly name the key properties the visualizer will look for
           fluxRaster: maskedFluxRaster,
-          originalFluxRaster: annualFluxRaster,
-          bounds,
-          buildingBoundaries,
           maskRaster,
+          buildingBoundaries,
+          bounds,
+          statistics,
+          // Debug information
+          debug: {
+            hasMask: !!maskRaster,
+            hasBuildingBoundaries: !!buildingBoundaries,
+            originalWidth: width,
+            originalHeight: height,
+          },
         };
 
         console.log("[AnnualFluxProcessor] Annual flux processing complete");
@@ -278,48 +286,36 @@ class AnnualFluxProcessor extends Processor {
   }
 
   /**
-   * Find valid data range in a raster
+   * Resize mask data to match flux dimensions
    * @private
-   * @param {Array<number>} raster - Raster data
-   * @param {number} noDataValue - Value to ignore as no-data
-   * @returns {Object} - Min and max values {min, max}
+   * @param {Array<number>} maskData - Original mask data
+   * @param {number} srcWidth - Source width
+   * @param {number} srcHeight - Source height
+   * @param {number} destWidth - Destination width
+   * @param {number} destHeight - Destination height
+   * @returns {Array<number>} - Resized mask data
    */
-  findDataRange(raster, noDataValue = -9999) {
-    try {
-      let min = Infinity;
-      let max = -Infinity;
-      let validCount = 0;
-      let sum = 0;
+  resizeMask(maskData, srcWidth, srcHeight, destWidth, destHeight) {
+    const resizedMask = new Array(destWidth * destHeight);
 
-      for (let i = 0; i < raster.length; i++) {
-        const value = raster[i];
-        if (value !== noDataValue && !isNaN(value)) {
-          min = Math.min(min, value);
-          max = Math.max(max, value);
-          sum += value;
-          validCount++;
-        }
+    // Scaling factors
+    const scaleX = srcWidth / destWidth;
+    const scaleY = srcHeight / destHeight;
+
+    for (let y = 0; y < destHeight; y++) {
+      for (let x = 0; x < destWidth; x++) {
+        // Find corresponding source pixel
+        const srcX = Math.min(Math.floor(x * scaleX), srcWidth - 1);
+        const srcY = Math.min(Math.floor(y * scaleY), srcHeight - 1);
+
+        const srcIdx = srcY * srcWidth + srcX;
+        const destIdx = y * destWidth + x;
+
+        resizedMask[destIdx] = maskData[srcIdx];
       }
-
-      // Check if we found any valid values
-      if (validCount === 0) {
-        console.warn("[AnnualFluxProcessor] No valid data found in raster");
-        return { min: 0, max: 1, avg: 0, validCount: 0 };
-      }
-
-      return {
-        min,
-        max,
-        avg: sum / validCount,
-        validCount,
-        sum,
-      };
-    } catch (error) {
-      console.error(
-        `[AnnualFluxProcessor] Error finding data range: ${error.message}`
-      );
-      return { min: 0, max: 1, avg: 0, validCount: 0, error: error.message };
     }
+
+    return resizedMask;
   }
 
   /**
@@ -333,13 +329,41 @@ class AnnualFluxProcessor extends Processor {
    */
   applyMask(fluxRaster, maskRaster, width, height) {
     try {
+      if (!maskRaster || maskRaster.length !== fluxRaster.length) {
+        console.warn(
+          `[AnnualFluxProcessor] Mask dimensions do not match flux dimensions. Flux: ${
+            fluxRaster.length
+          }, Mask: ${maskRaster ? maskRaster.length : "undefined"}`
+        );
+        return fluxRaster;
+      }
+
       const maskedRaster = new Array(fluxRaster.length);
       const noDataValue = config.processing.NO_DATA_VALUE;
+      let maskedCount = 0;
+
+      // Sample some values for debugging
+      const sampleMask = maskRaster.slice(0, 20);
+      const sampleFlux = fluxRaster.slice(0, 20);
+      console.log("[AnnualFluxProcessor] Mask sample:", sampleMask);
+      console.log("[AnnualFluxProcessor] Flux sample:", sampleFlux);
 
       for (let i = 0; i < fluxRaster.length; i++) {
-        // If mask is 0, set flux to no data value
-        maskedRaster[i] = maskRaster[i] > 0 ? fluxRaster[i] : noDataValue;
+        // Only keep flux values where mask is > 0 (building)
+        if (maskRaster[i] > 0) {
+          maskedRaster[i] = fluxRaster[i];
+        } else {
+          maskedRaster[i] = noDataValue;
+          maskedCount++;
+        }
       }
+
+      console.log(
+        `[AnnualFluxProcessor] Masked ${maskedCount} pixels (${(
+          (maskedCount / fluxRaster.length) *
+          100
+        ).toFixed(2)}% of total)`
+      );
 
       return maskedRaster;
     } catch (error) {
@@ -351,83 +375,137 @@ class AnnualFluxProcessor extends Processor {
   }
 
   /**
-   * Calculate statistics for the annual flux data
+   * Calculate mask statistics for debugging
    * @private
-   * @param {Array<number>} raster - Flux raster data
-   * @param {Object} dataRange - Data range from findDataRange
-   * @returns {Object} - Statistics object
+   * @param {Array<number>} maskRaster - Mask raster data
+   * @returns {Object} - Mask statistics
    */
-  calculateStatistics(raster, dataRange) {
+  calculateMaskStatistics(maskRaster) {
+    if (!maskRaster) return { available: false };
+
+    let buildingPixels = 0;
+    let nonBuildingPixels = 0;
+
+    for (let i = 0; i < maskRaster.length; i++) {
+      if (maskRaster[i] > 0) {
+        buildingPixels++;
+      } else {
+        nonBuildingPixels++;
+      }
+    }
+
+    return {
+      available: true,
+      total: maskRaster.length,
+      buildingPixels,
+      nonBuildingPixels,
+      buildingPercentage:
+        ((buildingPixels / maskRaster.length) * 100).toFixed(2) + "%",
+    };
+  }
+
+  /**
+   * Calculate statistics for annual flux data
+   * @private
+   * @param {Array<number>} fluxRaster - Flux raster data
+   * @returns {Object} - Statistics
+   */
+  calculateStatistics(fluxRaster) {
     try {
       const noDataValue = config.processing.NO_DATA_VALUE;
-      let count = 0;
+      let min = Infinity;
+      let max = -Infinity;
+      let sum = 0;
+      let validPixels = 0;
+      let maxValue = -Infinity;
       let maxLocation = -1;
-      let histogram = {};
+      let valueFrequency = new Map();
 
-      // Calculate sum and find maximum location
-      for (let i = 0; i < raster.length; i++) {
-        const value = raster[i];
+      // Calculate basic statistics
+      for (let i = 0; i < fluxRaster.length; i++) {
+        const value = fluxRaster[i];
+
         if (value !== noDataValue && !isNaN(value)) {
-          count++;
+          // Track min/max
+          min = Math.min(min, value);
+          max = Math.max(max, value);
 
-          // Find location of maximum value
-          if (value === dataRange.max) {
+          // Track sum for average
+          sum += value;
+          validPixels++;
+
+          // Track max value location
+          if (value > maxValue) {
+            maxValue = value;
             maxLocation = i;
           }
 
-          // Build histogram (rounded to nearest integer)
+          // Track value frequencies for mode calculation
           const roundedValue = Math.round(value);
-          histogram[roundedValue] = (histogram[roundedValue] || 0) + 1;
+          valueFrequency.set(
+            roundedValue,
+            (valueFrequency.get(roundedValue) || 0) + 1
+          );
         }
       }
 
-      // Find most common value (mode)
-      let mode = null;
-      let modeCount = 0;
-      for (const [value, valueCount] of Object.entries(histogram)) {
-        if (valueCount > modeCount) {
-          modeCount = valueCount;
-          mode = parseFloat(value);
+      // Find mode (most common value)
+      let mode = 0;
+      let maxFrequency = 0;
+
+      for (const [value, frequency] of valueFrequency.entries()) {
+        if (frequency > maxFrequency) {
+          maxFrequency = frequency;
+          mode = value;
         }
       }
 
-      // Calculate standard deviation
+      // Calculate average
+      const avg = validPixels > 0 ? sum / validPixels : 0;
+
+      // Calculate variance and standard deviation
       let sumSquaredDiff = 0;
-      const mean = dataRange.avg;
 
-      for (let i = 0; i < raster.length; i++) {
-        const value = raster[i];
+      for (let i = 0; i < fluxRaster.length; i++) {
+        const value = fluxRaster[i];
+
         if (value !== noDataValue && !isNaN(value)) {
-          sumSquaredDiff += Math.pow(value - mean, 2);
+          const diff = value - avg;
+          sumSquaredDiff += diff * diff;
         }
       }
 
-      const variance = sumSquaredDiff / count;
+      const variance = validPixels > 0 ? sumSquaredDiff / validPixels : 0;
       const stdDev = Math.sqrt(variance);
 
+      // Calculate estimated yearly potential (simplified)
+      // Annual energy (kWh) = Average flux (kWh/kW/year) * Valid area (m²) * System efficiency
+      const estimatedYearlyPotential = sum; // Total flux sum
+
       return {
-        min: dataRange.min,
-        max: dataRange.max,
-        avg: dataRange.avg,
-        mode: mode,
-        stdDev: stdDev,
-        variance: variance,
-        validPixels: count,
-        maxLocation: maxLocation,
-        // Estimated solar potential based on average values
-        // This is a simplified calculation and might need adjustment
-        estimatedYearlyPotential: dataRange.avg * (count / 1000), // Simplified metric
-        totalValue: dataRange.sum,
+        min,
+        max,
+        avg,
+        mode,
+        stdDev,
+        variance,
+        validPixels,
+        maxValue,
+        maxLocation,
+        totalValue: sum,
+        estimatedYearlyPotential,
       };
     } catch (error) {
       console.error(
         `[AnnualFluxProcessor] Error calculating statistics: ${error.message}`
       );
+
+      // Return minimal statistics
       return {
+        min: 0,
+        max: 100,
+        avg: 50,
         error: error.message,
-        min: dataRange?.min || 0,
-        max: dataRange?.max || 1,
-        avg: dataRange?.avg || 0,
       };
     }
   }

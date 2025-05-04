@@ -91,7 +91,7 @@ class AnnualFluxFetcher extends Fetcher {
       }
 
       // Extract annual flux URL and mask URL
-      const { annualFluxUrl, maskUrl, imageryQuality } = response;
+      const { annualFluxUrl, maskUrl, imageryQuality } = response.data;
 
       // Validate URLs
       if (!annualFluxUrl) {

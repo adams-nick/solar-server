@@ -60,7 +60,11 @@ class AnnualFluxVisualizer extends Visualizer {
         }
 
         // Validate processed data
-        this.validateProcessedData(processedData, ["fluxRaster", "metadata"]);
+        this.validateProcessedData(processedData, [
+          "fluxRaster",
+          "metadata",
+          "maskRaster",
+        ]);
 
         // Get data from processed result
         const { fluxRaster, metadata, buildingBoundaries, maskRaster } =
@@ -84,7 +88,7 @@ class AnnualFluxVisualizer extends Visualizer {
 
         // Determine dimensions and cropping
         let outputWidth, outputHeight, startX, startY;
-        let croppedData;
+        let croppedFlux, croppedMask;
 
         if (buildingFocus && buildingBoundaries?.hasBuilding) {
           // Use building boundaries for cropping
@@ -103,13 +107,20 @@ class AnnualFluxVisualizer extends Visualizer {
           outputWidth = bWidth;
           outputHeight = bHeight;
 
-          // Create cropped data array
-          croppedData = new Array(outputWidth * outputHeight);
+          // Create cropped data arrays
+          croppedFlux = new Array(outputWidth * outputHeight);
+          croppedMask = maskRaster
+            ? new Array(outputWidth * outputHeight)
+            : null;
+
           for (let y = 0; y < outputHeight; y++) {
             for (let x = 0; x < outputWidth; x++) {
               const srcIdx = (startY + y) * width + (startX + x);
               const destIdx = y * outputWidth + x;
-              croppedData[destIdx] = fluxRaster[srcIdx];
+              croppedFlux[destIdx] = fluxRaster[srcIdx];
+              if (croppedMask) {
+                croppedMask[destIdx] = maskRaster[srcIdx];
+              }
             }
           }
         } else {
@@ -121,43 +132,98 @@ class AnnualFluxVisualizer extends Visualizer {
           startY = 0;
           outputWidth = width;
           outputHeight = height;
-          croppedData = fluxRaster;
+          croppedFlux = fluxRaster;
+          croppedMask = maskRaster;
         }
 
         // Apply max dimension limit if needed
-        if (outputWidth > maxDimension || outputHeight > maxDimension) {
-          const aspectRatio = outputWidth / outputHeight;
-          if (outputWidth > outputHeight) {
-            outputWidth = maxDimension;
-            outputHeight = Math.round(maxDimension / aspectRatio);
-          } else {
-            outputHeight = maxDimension;
-            outputWidth = Math.round(maxDimension * aspectRatio);
-          }
-          console.log(
-            `[AnnualFluxVisualizer] Resized to ${outputWidth}x${outputHeight} to fit max dimension`
-          );
-        }
+        const { width: finalWidth, height: finalHeight } =
+          VisualizationUtils.resizeDimensions(outputWidth, outputHeight, {
+            maxDimension,
+          });
+
+        outputWidth = finalWidth;
+        outputHeight = finalHeight;
+
+        console.log(
+          `[AnnualFluxVisualizer] Resized to ${outputWidth}x${outputHeight} to fit max dimension`
+        );
 
         // Get data range for normalization
         let min = metadata.statistics?.min || 0;
-        let max = metadata.statistics?.max || 250; // Default reasonable max for kWh/kW/year
+        let max = metadata.statistics?.max || 2000; // Default higher max for annual data
 
-        // Create canvas using the utility function
-        const canvas = VisualizationUtils.createCanvas(
-          croppedData,
+        // Apply mask to flux data
+        let maskedFlux;
+        if (croppedMask) {
+          maskedFlux = this.applyMask(
+            croppedFlux,
+            croppedMask,
+            outputWidth,
+            outputHeight
+          );
+        } else {
+          maskedFlux = croppedFlux;
+        }
+
+        // Create empty canvas
+        const { canvas, ctx } = this.createEmptyCanvas(
           outputWidth,
           outputHeight,
-          palette,
           {
-            min,
-            max,
-            useAlpha: true, // Use alpha for non-building areas
+            transparent: true,
           }
         );
 
+        // Create image data
+        const imageData = ctx.createImageData(outputWidth, outputHeight);
+
+        // Calculate pixel scaling if dimensions changed
+        const scaleX = croppedFlux.length / outputWidth / outputHeight;
+
+        // Fill the image data
+        const noDataValue = config.processing.NO_DATA_VALUE;
+
+        for (let y = 0; y < outputHeight; y++) {
+          for (let x = 0; x < outputWidth; x++) {
+            // Get the source index with appropriate scaling
+            const srcIdx =
+              Math.floor(y * outputWidth * scaleX) + Math.floor(x * scaleX);
+            const destIdx = (y * outputWidth + x) * 4;
+
+            const value = maskedFlux[srcIdx];
+
+            if (value === noDataValue || value === undefined || isNaN(value)) {
+              // Transparent for no data
+              imageData.data[destIdx + 3] = 0;
+            } else {
+              // Normalize value to palette index
+              const normalizedValue = Math.max(
+                0,
+                Math.min(1, (value - min) / (max - min))
+              );
+              const colorIndex = Math.floor(
+                normalizedValue * (palette.length - 1)
+              );
+              const color = palette[colorIndex];
+
+              // Set RGB values
+              imageData.data[destIdx] = color.r;
+              imageData.data[destIdx + 1] = color.g;
+              imageData.data[destIdx + 2] = color.b;
+              imageData.data[destIdx + 3] = 255; // Fully opaque
+            }
+          }
+        }
+
+        // Put image data on canvas
+        ctx.putImageData(imageData, 0, 0);
+
+        // Add legend
+        this.addLegend(ctx, outputWidth, outputHeight, min, max, palette);
+
         // Convert to data URL
-        const dataUrl = VisualizationUtils.canvasToDataURL(canvas, {
+        const dataUrl = this.canvasToDataURL(canvas, {
           mimeType: "image/png",
           quality: options.quality || config.visualization.PNG_QUALITY,
         });
@@ -181,6 +247,34 @@ class AnnualFluxVisualizer extends Visualizer {
         },
         { createFallback: true }
       );
+    }
+  }
+
+  /**
+   * Apply mask to flux data
+   * @private
+   * @param {Array<number>} fluxRaster - Flux raster data
+   * @param {Array<number>} maskRaster - Mask raster data
+   * @param {number} width - Image width
+   * @param {number} height - Image height
+   * @returns {Array<number>} - Masked flux data
+   */
+  applyMask(fluxRaster, maskRaster, width, height) {
+    try {
+      const maskedRaster = new Array(fluxRaster.length);
+      const noDataValue = config.processing.NO_DATA_VALUE;
+
+      for (let i = 0; i < fluxRaster.length; i++) {
+        // If mask is 0 or undefined, set flux to no data value
+        maskedRaster[i] = maskRaster[i] > 0 ? fluxRaster[i] : noDataValue;
+      }
+
+      return maskedRaster;
+    } catch (error) {
+      console.error(
+        `[AnnualFluxVisualizer] Error applying mask: ${error.message}`
+      );
+      return fluxRaster; // Return original raster if masking fails
     }
   }
 
