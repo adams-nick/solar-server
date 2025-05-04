@@ -36,8 +36,8 @@ app.use("/api/v1/buildings", buildingRoutes);
 const solarRoutes = require("./api/routes/solarRoutes");
 app.use("/api/v1/solar", solarRoutes);
 // solar APi route for solar flux layer, WIP
-const solarApiRoutes = require("./api/routes/solarApiRoutes");
-app.use("/solar-api", solarApiRoutes);
+const dataLayersRoutes = require("./api/routes/dataLayersRoutes");
+app.use("/api/v1/data-layers", dataLayersRoutes);
 
 // Error handler
 app.use((err, req, res, next) => {

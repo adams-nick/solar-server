@@ -12,14 +12,17 @@ const LayerManager = require("./managers/layer-manager");
 // Import fetchers
 const MaskFetcher = require("./layers/mask/mask-fetcher");
 const MonthlyFluxFetcher = require("./layers/monthly-flux/monthly-flux-fetcher");
+const AnnualFluxFetcher = require("./layers/annual-flux/annual-flux-fetcher");
 
 // Import processors
 const MaskProcessor = require("./layers/mask/mask-processor");
 const MonthlyFluxProcessor = require("./layers/monthly-flux/monthly-flux-processor");
+const AnnualFluxProcessor = require("./layers/annual-flux/annual-flux-processor");
 
 // Import visualizers
 const MaskVisualizer = require("./layers/mask/mask-visualizer");
 const MonthlyFluxVisualizer = require("./layers/monthly-flux/monthly-flux-visualizer");
+const AnnualFluxVisualizer = require("./layers/annual-flux/annual-flux-visualizer");
 
 // Import utilities
 const ColorPalettes = require("./utils/color-palettes");
@@ -63,14 +66,17 @@ function createLayerManager(apiClient, options = {}) {
   // Register fetchers
   factory.registerFetcher(new MaskFetcher(apiClient));
   factory.registerFetcher(new MonthlyFluxFetcher(apiClient));
+  factory.registerFetcher(new AnnualFluxFetcher(apiClient));
 
   // Register processors
   factory.registerProcessor(new MaskProcessor());
   factory.registerProcessor(new MonthlyFluxProcessor());
+  factory.registerProcessor(new AnnualFluxProcessor());
 
   // Register visualizers
   factory.registerVisualizer(new MaskVisualizer());
   factory.registerVisualizer(new MonthlyFluxVisualizer());
+  factory.registerVisualizer(new AnnualFluxVisualizer());
 
   // Create layer manager
   return new LayerManager(factory, apiClient);
