@@ -1,113 +1,118 @@
 /**
  * GeoTIFF processing utility for SolarScanner data layers
+ * Based on Google's implementation pattern
  */
 
 const geotiff = require("geotiff");
 const proj4 = require("proj4");
 const geokeysToProj4 = require("geotiff-geokeys-to-proj4");
-const sharp = require("sharp"); // For additional image processing capabilities
 
 class GeoTiffProcessor {
   /**
    * Process a GeoTIFF buffer
    * @param {Buffer} buffer - The GeoTIFF buffer
    * @param {Object} options - Processing options
-   * @param {number} [options.page=0] - Page/image index for multi-page TIFFs
-   * @param {Array<number>} [options.samples] - Specific samples/bands to read
-   * @param {boolean} [options.useSharp=false] - Use sharp for processing if true
    * @returns {Promise<Object>} - Processed GeoTIFF data
    */
   async process(buffer, options = {}) {
     try {
-      // Choose between geotiff.js and sharp processing
-      if (options.useSharp) {
-        return this.processWithSharp(buffer, options);
-      } else {
-        return this.processWithGeotiff(buffer, options);
-      }
-    } catch (error) {
-      console.error(`Error processing GeoTIFF: ${error.message}`);
-      throw new Error(`Failed to process GeoTIFF: ${error.message}`);
-    }
-  }
+      // Log processing start with options
+      console.log(
+        `[GeoTiffProcessor] Processing GeoTIFF with options:`,
+        options
+      );
 
-  /**
-   * Process GeoTIFF buffer using geotiff.js library
-   * @private
-   * @param {Buffer} buffer - The GeoTIFF buffer
-   * @param {Object} options - Processing options
-   * @returns {Promise<Object>} - Processed GeoTIFF data
-   */
-  /**
-   * Process GeoTIFF buffer using geotiff.js library
-   * @private
-   * @param {Buffer} buffer - The GeoTIFF buffer
-   * @param {Object} options - Processing options
-   * @returns {Promise<Object>} - Processed GeoTIFF data
-   */
-  async processWithGeotiff(buffer, options = {}) {
-    try {
-      console.log("Processing GeoTIFF with geotiff.js library");
+      // Validate buffer type and content
+      this.validateBuffer(buffer);
 
-      // Ensure buffer is an ArrayBuffer
-      let arrayBuffer;
-      if (buffer instanceof Buffer) {
-        // Convert Node.js Buffer to ArrayBuffer
-        arrayBuffer = buffer.buffer.slice(
-          buffer.byteOffset,
-          buffer.byteOffset + buffer.byteLength
-        );
-      } else if (buffer instanceof ArrayBuffer) {
-        arrayBuffer = buffer;
-      } else if (buffer instanceof Uint8Array) {
-        arrayBuffer = buffer.buffer;
-      } else {
-        throw new Error(`Unsupported buffer type: ${typeof buffer}`);
-      }
+      // Convert buffer to ArrayBuffer for geotiff.js
+      const arrayBuffer = this.convertToArrayBuffer(buffer);
 
       // Parse the GeoTIFF
       const tiff = await geotiff.fromArrayBuffer(arrayBuffer);
+      const imageCount = await tiff.getImageCount();
+      console.log(
+        `[GeoTiffProcessor] GeoTIFF contains ${imageCount} images/pages`
+      );
 
-      // Get the image (for multi-page TIFFs, can specify page)
-      const image = await tiff.getImage(options.page || 0);
+      // Get the image (default to first page if not specified)
+      const pageIndex = options.page || 0;
+      const image = await tiff.getImage(pageIndex);
 
-      // Get image dimensions
+      // Extract metadata
       const width = image.getWidth();
       const height = image.getHeight();
-
-      // Get metadata
       const fileDirectory = image.getFileDirectory();
       const tiepoint = image.getTiePoints()[0];
       const pixelScale = fileDirectory.ModelPixelScale;
-      const geoKeys = image.getGeoKeys();
 
-      // Read rasters (bands)
+      // Get geospatial info if available
+      let geoKeys = null;
+      try {
+        geoKeys = image.getGeoKeys();
+      } catch (error) {
+        console.warn(
+          `[GeoTiffProcessor] GeoKeys not available: ${error.message}`
+        );
+      }
+
+      // Log image characteristics
+      console.log(`[GeoTiffProcessor] Image dimensions: ${width}x${height}`);
+      console.log(
+        `[GeoTiffProcessor] Samples per pixel: ${image.getSamplesPerPixel()}`
+      );
+      console.log(
+        `[GeoTiffProcessor] Bits per sample: ${fileDirectory.BitsPerSample[0]}`
+      );
+
+      // Configure raster reading options
       const readOptions = {};
       if (options.samples) {
         readOptions.samples = options.samples;
       }
-
-      const rasters = await image.readRasters(readOptions);
-
-      // Convert rasters from TypedArrays to regular arrays if needed
-      const processedRasters = [];
-      for (let i = 0; i < rasters.length; i++) {
-        if (options.convertToArray) {
-          processedRasters.push(Array.from(rasters[i]));
-        } else {
-          processedRasters.push(rasters[i]);
-        }
+      if (options.window) {
+        readOptions.window = options.window;
+      }
+      if (options.interleave !== undefined) {
+        readOptions.interleave = options.interleave;
       }
 
-      // Get bounding box in original projection
-      const bbox = image.getBoundingBox();
+      // Read the raster data
+      console.log(
+        `[GeoTiffProcessor] Reading rasters with options:`,
+        readOptions
+      );
+      const rasters = await image.readRasters(readOptions);
 
-      // Reproject bounds to standard lat/lon
+      // Process rasters based on options
+      const processedRasters = [];
+      for (let i = 0; i < rasters.length; i++) {
+        // Convert to regular array if requested
+        const raster = options.convertToArray
+          ? Array.from(rasters[i])
+          : rasters[i];
+
+        // Sample and log raster values for verification
+        this.logRasterSamples(raster, i, width, height);
+
+        processedRasters.push(raster);
+      }
+
+      // Get geographic bounds
+      let bbox = null;
+      try {
+        bbox = image.getBoundingBox();
+      } catch (error) {
+        console.warn(
+          `[GeoTiffProcessor] Could not get bounding box: ${error.message}`
+        );
+        bbox = [0, 0, width, height];
+      }
+
+      // Reproject bounds to WGS84 lat/lon
       const bounds = this.reprojectBounds(bbox, geoKeys);
 
-      // Count total bands in the image
-      const totalBands = image.getSamplesPerPixel();
-
+      // Return processed data structure
       return {
         metadata: {
           width,
@@ -115,152 +120,150 @@ class GeoTiffProcessor {
           tiepoint,
           pixelScale,
           geoKeys,
-          bands: totalBands,
+          bands: rasters.length,
           fileDirectory,
-          pages: tiff.getImageCount(),
+          pages: imageCount,
         },
         rasters: processedRasters,
         bounds,
         originalBbox: bbox,
       };
     } catch (error) {
-      console.error(`Error in processWithGeotiff: ${error.message}`);
-      throw error;
+      console.error(
+        `[GeoTiffProcessor] Error processing GeoTIFF: ${error.message}`
+      );
+      throw new Error(`Failed to process GeoTIFF: ${error.message}`);
     }
   }
 
   /**
-   * Process GeoTIFF buffer using sharp library
+   * Validate buffer type and content
    * @private
-   * @param {Buffer} buffer - The GeoTIFF buffer
-   * @param {Object} options - Processing options
-   * @returns {Promise<Object>} - Processed GeoTIFF data
+   * @param {Buffer} buffer - Buffer to validate
+   * @throws {Error} if buffer is invalid
    */
-  async processWithSharp(buffer, options = {}) {
-    try {
-      console.log("Processing GeoTIFF with sharp library");
+  validateBuffer(buffer) {
+    if (!buffer) {
+      throw new Error("Buffer is null or undefined");
+    }
 
-      // Create sharp instance
-      const sharpImg = sharp(buffer);
+    if (buffer.byteLength === 0) {
+      throw new Error("Buffer is empty (zero length)");
+    }
 
-      // Get image metadata
-      const metadata = await sharpImg.metadata();
+    // Log buffer info for debugging
+    console.log(`[GeoTiffProcessor] Buffer info:
+      Type: ${typeof buffer}
+      Is Buffer: ${buffer instanceof Buffer}
+      Is ArrayBuffer: ${buffer instanceof ArrayBuffer}
+      Is Uint8Array: ${buffer instanceof Uint8Array}
+      Length: ${buffer.byteLength || buffer.length || "unknown"}
+    `);
+  }
 
-      // Extract specific page if this is a multi-page TIFF
-      if (metadata.pages > 1 && options.page !== undefined) {
-        sharpImg.page(options.page);
-      }
-
-      // Extract the raw pixel data
-      const { data, info } = await sharpImg
-        .raw()
-        .toBuffer({ resolveWithObject: true });
-
-      // Create a simple raster from the raw data
-      // Note: Sharp doesn't provide direct access to geographic metadata
-      // So we'll need to use geotiff.js to get that info
-
-      // Use geotiff.js just to get the geographic metadata
-      const tiff = await geotiff.fromArrayBuffer(buffer);
-      const image = await tiff.getImage(options.page || 0);
-      const geoKeys = image.getGeoKeys();
-      const bbox = image.getBoundingBox();
-      const bounds = this.reprojectBounds(bbox, geoKeys);
-
-      // Split the data into separate bands/channels
-      const rasters = [];
-      const channels = info.channels;
-
-      // If this is grayscale, we have one channel
-      if (channels === 1) {
-        rasters.push(data);
-      } else {
-        // For multi-channel images, split into separate bands
-        for (let c = 0; c < channels; c++) {
-          const bandData = new Uint8Array(info.width * info.height);
-          for (let i = 0; i < info.width * info.height; i++) {
-            bandData[i] = data[i * channels + c];
-          }
-          rasters.push(bandData);
-        }
-      }
-
-      return {
-        metadata: {
-          width: info.width,
-          height: info.height,
-          geoKeys,
-          bands: channels,
-          pages: metadata.pages || 1,
-        },
-        rasters,
-        bounds,
-        originalBbox: bbox,
-        sharpMetadata: metadata, // Include the original sharp metadata
-      };
-    } catch (error) {
-      console.error(`Error in processWithSharp: ${error.message}`);
-
-      // Fall back to geotiff.js processing
-      console.log("Falling back to geotiff.js processing");
-      return this.processWithGeotiff(buffer, options);
+  /**
+   * Convert buffer to ArrayBuffer for geotiff.js
+   * @private
+   * @param {Buffer|ArrayBuffer|Uint8Array} buffer - Buffer to convert
+   * @returns {ArrayBuffer} - ArrayBuffer for geotiff.js
+   */
+  convertToArrayBuffer(buffer) {
+    if (buffer instanceof ArrayBuffer) {
+      return buffer;
+    } else if (buffer instanceof Buffer || buffer instanceof Uint8Array) {
+      return buffer.buffer.slice(
+        buffer.byteOffset,
+        buffer.byteOffset + buffer.byteLength
+      );
+    } else {
+      throw new Error(`Cannot convert ${typeof buffer} to ArrayBuffer`);
     }
   }
 
   /**
-   * Extract a specific band/page from a multi-band/multi-page GeoTIFF
-   * @param {Buffer} buffer - The GeoTIFF buffer
-   * @param {number} bandIndex - The band/page index to extract
-   * @param {Object} options - Additional options
-   * @returns {Promise<Object>} - Processed single-band GeoTIFF data
+   * Log sample values from raster for debugging
+   * @private
+   * @param {TypedArray|Array} raster - Raster data
+   * @param {number} index - Raster index
+   * @param {number} width - Image width
+   * @param {number} height - Image height
    */
-  async extractBand(buffer, bandIndex, options = {}) {
-    try {
-      console.log(`Extracting band/page ${bandIndex} from GeoTIFF`);
+  logRasterSamples(raster, index, width, height) {
+    if (!raster || raster.length === 0) return;
 
-      const useSharp = options.useSharp || false;
+    // Sample different regions of the raster
+    const centerY = Math.floor(height / 2);
+    const centerX = Math.floor(width / 2);
 
-      if (useSharp) {
-        // Use sharp to extract the specific page
-        const sharpImg = sharp(buffer);
-        const metadata = await sharpImg.metadata();
+    // Get top-left, center, and random samples
+    const samples = {
+      topLeft: raster[0],
+      topRight: raster[width - 1],
+      center: raster[centerY * width + centerX],
+      bottomLeft: raster[(height - 1) * width],
+      bottomRight: raster[(height - 1) * width + (width - 1)],
+    };
 
-        if (bandIndex >= metadata.pages) {
-          throw new Error(
-            `Band index ${bandIndex} out of range (max: ${metadata.pages - 1})`
-          );
+    // Sample row averages
+    const rowSamples = [];
+    for (
+      let row = 0;
+      row < height;
+      row += Math.max(1, Math.floor(height / 10))
+    ) {
+      let sum = 0;
+      let count = 0;
+
+      for (let x = 0; x < width; x++) {
+        const value = raster[row * width + x];
+        if (value !== undefined && !isNaN(value)) {
+          sum += value;
+          count++;
         }
-
-        return this.processWithSharp(buffer, {
-          ...options,
-          page: bandIndex,
-        });
-      } else {
-        // Use geotiff.js to extract the specific band/sample
-        return this.processWithGeotiff(buffer, {
-          ...options,
-          page: bandIndex,
-          samples: [bandIndex],
-        });
       }
-    } catch (error) {
-      console.error(`Error extracting band ${bandIndex}: ${error.message}`);
-      throw new Error(`Failed to extract band ${bandIndex}: ${error.message}`);
+
+      rowSamples.push({
+        row,
+        avg: count > 0 ? sum / count : NaN,
+      });
     }
+
+    // Log samples
+    console.log(`[GeoTiffProcessor] Raster ${index} samples:`, samples);
+    console.log(`[GeoTiffProcessor] Row average samples:`);
+    rowSamples.forEach((sample) => {
+      if (!isNaN(sample.avg)) {
+        console.log(`  Row ${sample.row}: ${sample.avg.toFixed(2)}`);
+      }
+    });
   }
 
   /**
    * Reproject bounding box to standard lat/lon coordinates
-   * @param {Array<number>} bbox - The bounding box from GeoTIFF [west, south, east, north]
-   * @param {Object} geoKeys - The GeoKeys from GeoTIFF
-   * @returns {Object} - Reprojected bounds {north, south, east, west}
+   * @private
+   * @param {Array<number>} bbox - Bounding box [west, south, east, north]
+   * @param {Object} geoKeys - GeoTIFF geoKeys
+   * @returns {Object} - Bounds object {north, south, east, west}
    */
   reprojectBounds(bbox, geoKeys) {
     try {
-      // Convert GeoKeys to Proj4 projection string
+      // Handle missing geoKeys
+      if (!geoKeys) {
+        console.warn(
+          "[GeoTiffProcessor] No GeoKeys for reprojection, using original bbox"
+        );
+        return {
+          north: bbox[3],
+          south: bbox[1],
+          east: bbox[2],
+          west: bbox[0],
+        };
+      }
+
+      // Convert geoKeys to proj4 format
       const projObj = geokeysToProj4.toProj4(geoKeys);
 
-      // Create projection function for converting coordinates
+      // Create projection function
       const projection = proj4(projObj.proj4, "WGS84");
 
       // Get coordinate conversion parameters
@@ -269,7 +272,7 @@ class GeoTiffProcessor {
         y: 1,
       };
 
-      // Convert southwest and northeast corners to WGS84 (lat/lng)
+      // Convert southwest and northeast corners
       const sw = projection.forward({
         x: bbox[0] * convParams.x,
         y: bbox[1] * convParams.y,
@@ -280,7 +283,7 @@ class GeoTiffProcessor {
         y: bbox[3] * convParams.y,
       });
 
-      // Return bounds in standard lat/lng format
+      // Return standardized bounds
       return {
         north: ne.y,
         south: sw.y,
@@ -288,10 +291,11 @@ class GeoTiffProcessor {
         west: sw.x,
       };
     } catch (error) {
-      console.error(`Error reprojecting bounds: ${error.message}`);
+      console.error(
+        `[GeoTiffProcessor] Error reprojecting bounds: ${error.message}`
+      );
 
-      // Return null or a placeholder if reprojection fails
-      console.warn("Returning unprojected bounding box due to error");
+      // Return original bounds on error
       return {
         north: bbox[3],
         south: bbox[1],
@@ -302,34 +306,38 @@ class GeoTiffProcessor {
   }
 
   /**
-   * Find valid data range in the raster (ignoring no-data values)
+   * Find valid data range in a raster
    * @param {TypedArray|Array} raster - Raster data
-   * @param {number} [noDataValue=-9999] - Value to ignore as no-data
-   * @returns {Object} - Min and max values {min, max}
+   * @param {number} [noDataValue=-9999] - Value to ignore
+   * @returns {Object} - Data range {min, max}
    */
   findDataRange(raster, noDataValue = -9999) {
     try {
       let min = Infinity;
       let max = -Infinity;
+      let validCount = 0;
 
       for (let i = 0; i < raster.length; i++) {
         const value = raster[i];
-        if (value !== noDataValue && !isNaN(value)) {
+        if (value !== noDataValue && !isNaN(value) && isFinite(value)) {
           min = Math.min(min, value);
           max = Math.max(max, value);
+          validCount++;
         }
       }
 
-      // Check if we found any valid values
-      if (min === Infinity || max === -Infinity) {
-        console.warn("No valid data found in raster");
-        return { min: 0, max: 1 }; // Default range
+      // Check for valid range
+      if (validCount === 0 || min === Infinity || max === -Infinity) {
+        console.warn("[GeoTiffProcessor] No valid data found in raster");
+        return { min: 0, max: 1, validCount: 0 };
       }
 
-      return { min, max };
+      return { min, max, validCount };
     } catch (error) {
-      console.error(`Error finding data range: ${error.message}`);
-      return { min: 0, max: 1 }; // Default range
+      console.error(
+        `[GeoTiffProcessor] Error finding data range: ${error.message}`
+      );
+      return { min: 0, max: 1, validCount: 0 };
     }
   }
 }

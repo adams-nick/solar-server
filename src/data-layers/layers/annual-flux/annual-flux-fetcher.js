@@ -2,7 +2,7 @@
  * Annual flux layer fetcher for SolarScanner data-layers module
  *
  * Handles fetching of annual flux layer data from the Google Solar API.
- * Annual flux data represents yearly solar irradiance potential.
+ * Annual flux represents yearly solar irradiance potential.
  */
 
 const Fetcher = require("../../core/fetcher");
@@ -61,13 +61,12 @@ class AnnualFluxFetcher extends Fetcher {
       }
 
       // Format parameters for Google Solar API
-      const params = new URLSearchParams({
-        "location.latitude": location.latitude.toFixed(5),
-        "location.longitude": location.longitude.toFixed(5),
-        radius_meters: radius.toString(),
-        required_quality: quality,
-        key: apiKey,
-      });
+      const params = this.formatSolarApiParams(
+        location,
+        radius,
+        quality,
+        apiKey
+      );
 
       // Log the request (with API key masked)
       console.log(
@@ -98,6 +97,9 @@ class AnnualFluxFetcher extends Fetcher {
         console.error(
           "[AnnualFluxFetcher] Annual flux URL not found in Solar API response"
         );
+        console.log(
+          `[AnnualFluxFetcher] API response: ${JSON.stringify(response.data)}`
+        );
         throw new Error("Annual flux URL not found in API response");
       }
 
@@ -111,11 +113,11 @@ class AnnualFluxFetcher extends Fetcher {
       );
 
       // Download the annual flux data
-      let annualFluxData;
+      let fluxData;
       try {
-        annualFluxData = await this.downloadRawData(annualFluxUrl, apiKey);
+        fluxData = await this.downloadRawData(annualFluxUrl, apiKey);
         console.log(
-          `[AnnualFluxFetcher] Successfully downloaded annual flux data: ${annualFluxData.byteLength} bytes`
+          `[AnnualFluxFetcher] Successfully downloaded annual flux data: ${fluxData.byteLength} bytes`
         );
       } catch (error) {
         console.error(
@@ -135,9 +137,9 @@ class AnnualFluxFetcher extends Fetcher {
           console.log(
             `[AnnualFluxFetcher] Successfully downloaded mask data: ${maskData.byteLength} bytes`
           );
-        } catch (maskError) {
+        } catch (error) {
           console.warn(
-            `[AnnualFluxFetcher] Failed to download mask data: ${maskError.message}`
+            `[AnnualFluxFetcher] Failed to download mask data: ${error.message}`
           );
           // Continue without mask data
         }
@@ -145,12 +147,12 @@ class AnnualFluxFetcher extends Fetcher {
 
       // Return both the annual flux data and additional information
       return {
-        annualFluxData,
+        fluxData,
         maskData,
         metadata: {
           imageryQuality,
-          imageryDate: response.imageryDate,
-          imageryProcessedDate: response.imageryProcessedDate,
+          imageryDate: response.data.imageryDate,
+          imageryProcessedDate: response.data.imageryProcessedDate,
           location,
         },
       };
@@ -214,7 +216,7 @@ class AnnualFluxFetcher extends Fetcher {
         );
 
         // Check if annual flux URL is available
-        const isAvailable = !!response.annualFluxUrl;
+        const isAvailable = !!response.data.annualFluxUrl;
 
         console.log(
           `[AnnualFluxFetcher] Annual flux data ${
