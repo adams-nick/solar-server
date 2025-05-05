@@ -13,16 +13,19 @@ const LayerManager = require("./managers/layer-manager");
 const MaskFetcher = require("./layers/mask/mask-fetcher");
 const MonthlyFluxFetcher = require("./layers/monthly-flux/monthly-flux-fetcher");
 const AnnualFluxFetcher = require("./layers/annual-flux/annual-flux-fetcher");
+const RgbFetcher = require("./layers/rgb/rgb-fetcher"); // Add RGB fetcher
 
 // Import processors
 const MaskProcessor = require("./layers/mask/mask-processor");
 const MonthlyFluxProcessor = require("./layers/monthly-flux/monthly-flux-processor");
 const AnnualFluxProcessor = require("./layers/annual-flux/annual-flux-processor");
+const RgbProcessor = require("./layers/rgb/rgb-processor"); // Add RGB processor
 
 // Import visualizers
 const MaskVisualizer = require("./layers/mask/mask-visualizer");
 const MonthlyFluxVisualizer = require("./layers/monthly-flux/monthly-flux-visualizer");
 const AnnualFluxVisualizer = require("./layers/annual-flux/annual-flux-visualizer");
+const RgbVisualizer = require("./layers/rgb/rgb-visualizer"); // Add RGB visualizer
 
 // Import utilities
 const ColorPalettes = require("./utils/color-palettes");
@@ -67,16 +70,19 @@ function createLayerManager(apiClient, options = {}) {
   factory.registerFetcher(new MaskFetcher(apiClient));
   factory.registerFetcher(new MonthlyFluxFetcher(apiClient));
   factory.registerFetcher(new AnnualFluxFetcher(apiClient));
+  factory.registerFetcher(new RgbFetcher(apiClient)); // Register RGB fetcher
 
   // Register processors
   factory.registerProcessor(new MaskProcessor());
   factory.registerProcessor(new MonthlyFluxProcessor());
   factory.registerProcessor(new AnnualFluxProcessor());
+  factory.registerProcessor(new RgbProcessor()); // Register RGB processor
 
   // Register visualizers
   factory.registerVisualizer(new MaskVisualizer());
   factory.registerVisualizer(new MonthlyFluxVisualizer());
   factory.registerVisualizer(new AnnualFluxVisualizer());
+  factory.registerVisualizer(new RgbVisualizer()); // Register RGB visualizer
 
   // Create layer manager
   return new LayerManager(factory, apiClient);
