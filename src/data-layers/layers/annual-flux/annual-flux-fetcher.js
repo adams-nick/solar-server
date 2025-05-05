@@ -68,13 +68,6 @@ class AnnualFluxFetcher extends Fetcher {
         apiKey
       );
 
-      // Log the request (with API key masked)
-      console.log(
-        `[AnnualFluxFetcher] Requesting data layers with params: ${params
-          .toString()
-          .replace(/key=[^&]+/, "key=*****")}`
-      );
-
       // Make request to Google Solar API
       let response;
       try {
@@ -97,19 +90,11 @@ class AnnualFluxFetcher extends Fetcher {
         console.error(
           "[AnnualFluxFetcher] Annual flux URL not found in Solar API response"
         );
-        console.log(
-          `[AnnualFluxFetcher] API response: ${JSON.stringify(response.data)}`
-        );
         throw new Error("Annual flux URL not found in API response");
       }
 
       console.log(
         `[AnnualFluxFetcher] Successfully retrieved annual flux URL from Solar API`
-      );
-      console.log(`[AnnualFluxFetcher] Annual Flux URL: ${annualFluxUrl}`);
-      console.log(`[AnnualFluxFetcher] Mask URL: ${maskUrl}`);
-      console.log(
-        `[AnnualFluxFetcher] Imagery quality: ${imageryQuality || "unknown"}`
       );
 
       // Download the annual flux data

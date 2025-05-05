@@ -244,108 +244,40 @@ class VisualizationUtils {
   }
 
   /**
-   * Add/modify the following functions in your VisualizationUtils.js
+   * Create a canvas and draw raster data using a color palette
+   * @param {Array} data - Raster data
+   * @param {number} width - Image width
+   * @param {number} height - Image height
+   * @param {Array} palette - Color palette (array of {r,g,b} objects)
+   * @param {Object} options - Visualization options
+   * @param {number} [options.min] - Minimum data value (for normalization)
+   * @param {number} [options.max] - Maximum data value (for normalization)
+   * @param {boolean} [options.useAlpha=true] - Use alpha channel for null values
+   * @returns {HTMLCanvasElement} - Canvas element
    */
-
-  // Add this function to your VisualizationUtils class
-  static analyzeRowDistribution(data, width, height, label) {
-    if (!data || !width || height <= 0) {
-      console.log(
-        `[VisualizationUtils] Cannot analyze data: invalid parameters`
-      );
-      return;
-    }
-
-    const rowStats = [];
-    const noDataValue = -9999; // Default no-data value
-
-    // Sample rows at regular intervals
-    for (let y = 0; y < height; y += Math.max(1, Math.floor(height / 10))) {
-      const row = Math.floor(y);
-      let validCount = 0,
-        sum = 0;
-      let sampleValues = [];
-
-      // Analyze entire row
-      for (let x = 0; x < width; x++) {
-        const idx = row * width + x;
-        const val = data[idx];
-
-        if (val !== noDataValue && !isNaN(val) && isFinite(val)) {
-          validCount++;
-          sum += val;
-          if (sampleValues.length < 5) {
-            sampleValues.push(val);
-          }
-        }
-      }
-
-      const avgVal = validCount > 0 ? (sum / validCount).toFixed(2) : "N/A";
-      rowStats.push(
-        `Row ${row}: ${validCount}/${width} valid pixels (${(
-          (validCount / width) *
-          100
-        ).toFixed(1)}%), Avg: ${avgVal}, Samples: [${sampleValues.join(", ")}]`
-      );
-    }
-
-    console.log(`[DEBUG] ${label} Distribution:\n${rowStats.join("\n")}`);
-
-    return rowStats;
-  }
-
-  // Enhance the createCanvas function to log detailed diagnostic info
   static createCanvas(data, width, height, palette, options = {}) {
     try {
-      // Add debugging info
-      const debug = options.debug === true;
-      if (debug) {
-        console.log(
-          `[VisualizationUtils] DEBUG: Creating canvas ${width}x${height}`
-        );
-        console.log(`[VisualizationUtils] DEBUG: Data length: ${data.length}`);
-        // Sample a few values from the data
-        const samples = [];
-        for (let i = 0; i < Math.min(10, data.length); i++) {
-          samples.push(data[i]);
-        }
-        console.log(
-          `[VisualizationUtils] DEBUG: Data samples: ${samples.join(", ")}`
-        );
-      }
-
-      // Get canvas context
+      // Create canvas
       const canvas = createCanvas(width, height);
       const ctx = canvas.getContext("2d");
 
       // Create image data
       const imageData = ctx.createImageData(width, height);
 
-      // Get visualization options
+      // Determine value range for normalization
       const min = options.min !== undefined ? options.min : 0;
       const max = options.max !== undefined ? options.max : 1;
       const noDataValue =
         options.noDataValue !== undefined ? options.noDataValue : -9999;
       const useAlpha = options.useAlpha !== false;
 
-      // CRITICAL FIX: Ensure we're accessing data in the correct order
-      // Process pixels in row-column order
+      // Fill image data
       for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
-          // Calculate index in the 1D array - EXPLICIT ROW-COLUMN CALCULATION
-          const dataIndex = y * width + x;
-          const pixelIndex = dataIndex * 4;
+          const index = y * width + x;
+          const pixelIndex = index * 4;
 
-          // Make sure we're not going out of bounds
-          if (dataIndex >= data.length) {
-            if (debug)
-              console.log(
-                `[VisualizationUtils] DEBUG: Out of bounds at ${x},${y}`
-              );
-            continue;
-          }
-
-          const value = data[dataIndex];
+          const value = data[index];
 
           // Check if this is a valid data point
           const isValid =
@@ -363,15 +295,14 @@ class VisualizationUtils {
             );
 
             // Map to color palette
-            const colorIndex = Math.floor(
-              normalizedValue * (palette.length - 1)
-            );
-            // Add bounds check
-            const boundedIndex = Math.max(
+            const colorIndex = Math.max(
               0,
-              Math.min(palette.length - 1, colorIndex)
+              Math.min(
+                palette.length - 1,
+                Math.floor(normalizedValue * (palette.length - 1))
+              )
             );
-            const color = palette[boundedIndex];
+            const color = palette[colorIndex];
 
             // Set RGB values
             imageData.data[pixelIndex] = color.r;
@@ -386,32 +317,25 @@ class VisualizationUtils {
             imageData.data[pixelIndex + 3] = useAlpha ? 0 : 255; // Transparent if using alpha
           }
         }
-
-        // Debug log for every 100 rows
-        if (debug && y % 100 === 0) {
-          console.log(
-            `[VisualizationUtils] DEBUG: Processed row ${y}/${height}`
-          );
-        }
       }
 
-      // Apply the image data to the canvas
+      // Put the image data on the canvas
       ctx.putImageData(imageData, 0, 0);
-
-      if (debug) {
-        console.log(
-          "[VisualizationUtils] DEBUG: Canvas creation completed successfully"
-        );
-      }
 
       return canvas;
     } catch (error) {
-      console.error(
-        `[VisualizationUtils] Error creating canvas: ${error.message}`
-      );
+      console.error(`Error creating canvas: ${error.message}`);
       console.error(error.stack);
+
       // Create fallback canvas
-      // ... (rest of the error handling code)
+      const canvas = createCanvas(width, height);
+      const ctx = canvas.getContext("2d");
+
+      // Fill with error pattern
+      ctx.fillStyle = "#f8f8f8";
+      ctx.fillRect(0, 0, width, height);
+
+      return canvas;
     }
   }
 

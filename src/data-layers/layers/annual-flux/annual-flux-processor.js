@@ -37,15 +37,6 @@ class AnnualFluxProcessor extends Processor {
       return await this.timeOperation("process", async () => {
         console.log("[AnnualFluxProcessor] Processing annual flux data");
 
-        // DIAGNOSTIC MODE OPTIONS
-        const DIAGNOSTIC_MODE = options.diagnosticMode || {
-          enabled: true,
-          skipMasking: false, // Skip mask application
-          skipBoundaries: false, // Skip boundary detection
-          sampleRows: true, // Sample row distribution
-          outputStages: true, // Output intermediate stages
-        };
-
         // Extract the flux and mask buffers from input
         const { fluxBuffer, maskBuffer, metadata } =
           this.extractBuffers(rawData);
@@ -74,27 +65,14 @@ class AnnualFluxProcessor extends Processor {
         // Get the flux raster (first band for annual flux)
         const fluxRaster = fluxRasters[0];
 
-        // DIAGNOSTIC: Analyze raw flux data
-        if (DIAGNOSTIC_MODE.enabled && DIAGNOSTIC_MODE.sampleRows) {
-          this.analyzeRowDistribution(
-            fluxRaster,
-            width,
-            height,
-            "Raw Flux Data"
-          );
-        }
-
-        // Store raw flux data for diagnostic visualization
-        let rawFluxRaster = null;
-        if (DIAGNOSTIC_MODE.enabled && DIAGNOSTIC_MODE.outputStages) {
-          rawFluxRaster = [...fluxRaster]; // Clone to preserve
-        }
+        // Store raw flux data for visualization
+        const rawFluxRaster = [...fluxRaster]; // Clone to preserve
 
         // Process the mask if available
         let maskRaster = null;
         let buildingBoundaries = null;
 
-        if (maskBuffer && !DIAGNOSTIC_MODE.skipMasking) {
+        if (maskBuffer) {
           const processingResult = await this.processMask(
             maskBuffer,
             width,
@@ -103,18 +81,9 @@ class AnnualFluxProcessor extends Processor {
           );
 
           maskRaster = processingResult.maskRaster;
-
-          if (!DIAGNOSTIC_MODE.skipBoundaries) {
-            buildingBoundaries = processingResult.buildingBoundaries;
-          } else {
-            // Create default boundaries if skipping
-            buildingBoundaries = this.createDefaultBuildingBoundaries(
-              width,
-              height
-            );
-          }
+          buildingBoundaries = processingResult.buildingBoundaries;
         } else {
-          // Create default mask and boundaries if no mask provided or skipping
+          // Create default mask and boundaries if no mask provided
           console.log(
             "[AnnualFluxProcessor] Using default mask and boundaries"
           );
@@ -125,40 +94,13 @@ class AnnualFluxProcessor extends Processor {
           );
         }
 
-        // DIAGNOSTIC: Analyze mask data
-        if (
-          DIAGNOSTIC_MODE.enabled &&
-          DIAGNOSTIC_MODE.sampleRows &&
-          maskRaster
-        ) {
-          this.analyzeRowDistribution(maskRaster, width, height, "Mask Data");
-        }
-
-        // Apply the mask to the flux data or skip masking in diagnostic mode
-        let maskedFluxRaster;
-        if (DIAGNOSTIC_MODE.skipMasking) {
-          console.log(
-            "[AnnualFluxProcessor] DIAGNOSTIC: Skipping mask application"
-          );
-          maskedFluxRaster = fluxRaster;
-        } else {
-          maskedFluxRaster = this.applyMask(
-            fluxRaster,
-            maskRaster,
-            width,
-            height
-          );
-        }
-
-        // DIAGNOSTIC: Analyze masked flux data
-        if (DIAGNOSTIC_MODE.enabled && DIAGNOSTIC_MODE.sampleRows) {
-          this.analyzeRowDistribution(
-            maskedFluxRaster,
-            width,
-            height,
-            "Masked Flux Data"
-          );
-        }
+        // Apply the mask to the flux data
+        let maskedFluxRaster = this.applyMask(
+          fluxRaster,
+          maskRaster,
+          width,
+          height
+        );
 
         // Find valid data range
         const dataRange = this.calculateDataRange(maskedFluxRaster);
@@ -169,7 +111,7 @@ class AnnualFluxProcessor extends Processor {
           dataRange
         );
 
-        // Create the result object with diagnostic data
+        // Create the result object
         const result = {
           layerType: "annualFlux",
           metadata: {
@@ -179,19 +121,11 @@ class AnnualFluxProcessor extends Processor {
             dataRange,
           },
           fluxRaster: maskedFluxRaster,
-          originalFluxRaster: fluxRaster,
+          originalFluxRaster: rawFluxRaster,
           maskRaster,
           buildingBoundaries,
           bounds,
           statistics,
-          // Add diagnostic data
-          diagnosticData: DIAGNOSTIC_MODE.enabled
-            ? {
-                rawFluxRaster,
-                skipMasking: DIAGNOSTIC_MODE.skipMasking,
-                skipBoundaries: DIAGNOSTIC_MODE.skipBoundaries,
-              }
-            : null,
         };
 
         console.log("[AnnualFluxProcessor] Annual flux processing complete");
@@ -277,13 +211,6 @@ class AnnualFluxProcessor extends Processor {
         `[AnnualFluxProcessor] Annual flux GeoTIFF processed: ${result.metadata.width}x${result.metadata.height} pixels, ${result.rasters.length} bands`
       );
 
-      // Log sample values
-      this.logRasterSamples(
-        result.rasters[0],
-        result.metadata.width,
-        result.metadata.height
-      );
-
       return result;
     } catch (error) {
       console.error(
@@ -339,9 +266,6 @@ class AnnualFluxProcessor extends Processor {
           fluxHeight
         );
       }
-
-      // Log mask sample values
-      this.logRasterSamples(maskRaster, fluxWidth, fluxHeight, "Mask");
 
       // Count non-zero values in mask
       const nonZeroCount = this.countNonZeroValues(maskRaster);
@@ -468,11 +392,7 @@ class AnnualFluxProcessor extends Processor {
       let maskedCount = 0;
       let validCount = 0;
 
-      // Apply mask by row then column - for debugging
       for (let y = 0; y < height; y++) {
-        let rowValid = 0;
-        let rowMasked = 0;
-
         for (let x = 0; x < width; x++) {
           const idx = y * width + x;
 
@@ -485,19 +405,10 @@ class AnnualFluxProcessor extends Processor {
           ) {
             maskedRaster[idx] = fluxRaster[idx];
             validCount++;
-            rowValid++;
           } else {
             maskedRaster[idx] = noDataValue;
             maskedCount++;
-            rowMasked++;
           }
-        }
-
-        // Log row statistics every 50 rows
-        if (y % 50 === 0 || y === height - 1) {
-          console.log(
-            `[AnnualFluxProcessor] Row ${y}: ${rowValid} valid pixels, ${rowMasked} masked pixels`
-          );
         }
       }
 
@@ -612,12 +523,6 @@ class AnnualFluxProcessor extends Processor {
 
       const percentileMin = validValues[lowIndex];
       const percentileMax = validValues[highIndex];
-
-      console.log(`[AnnualFluxProcessor] Data range:
-        All values: min=${absMin}, max=${absMax}
-        Filtered (5%-95%): min=${percentileMin}, max=${percentileMax}
-        Valid pixels: ${validValues.length}
-      `);
 
       // For annual flux, establish standard range (0-1800)
       return {
@@ -758,120 +663,6 @@ class AnnualFluxProcessor extends Processor {
         error: error.message,
       };
     }
-  }
-
-  /**
-   * Log sample values from a raster for debugging
-   * @private
-   * @param {Array} raster - Raster data
-   * @param {number} width - Image width
-   * @param {number} height - Image height
-   * @param {string} label - Label for logging
-   */
-  logRasterSamples(raster, width, height, label = "Flux") {
-    if (!raster || !width || !height) return;
-
-    try {
-      const sample = {
-        topLeft: [],
-        topCenter: [],
-        center: [],
-        random: [],
-      };
-
-      // Sample positions
-      const centerX = Math.floor(width / 2);
-      const centerY = Math.floor(height / 2);
-
-      // Get top-left 3x3 sample
-      for (let y = 0; y < 3; y++) {
-        for (let x = 0; x < 3; x++) {
-          const idx = y * width + x;
-          if (idx < raster.length) sample.topLeft.push(raster[idx]);
-        }
-      }
-
-      // Get top-center 3x3 sample
-      for (let y = 0; y < 3; y++) {
-        for (let x = centerX - 1; x <= centerX + 1; x++) {
-          const idx = y * width + x;
-          if (idx < raster.length) sample.topCenter.push(raster[idx]);
-        }
-      }
-
-      // Get center 3x3 sample
-      for (let y = centerY - 1; y <= centerY + 1; y++) {
-        for (let x = centerX - 1; x <= centerX + 1; x++) {
-          const idx = y * width + x;
-          if (idx < raster.length) sample.center.push(raster[idx]);
-        }
-      }
-
-      // Get 5 random samples
-      for (let i = 0; i < 5; i++) {
-        const randomIdx = Math.floor(Math.random() * raster.length);
-        sample.random.push({
-          idx: randomIdx,
-          row: Math.floor(randomIdx / width),
-          col: randomIdx % width,
-          value: raster[randomIdx],
-        });
-      }
-
-      console.log(`[AnnualFluxProcessor] ${label} raster samples:
-        Top-left 3x3: ${JSON.stringify(sample.topLeft)}
-        Top-center 3x3: ${JSON.stringify(sample.topCenter)}
-        Center 3x3: ${JSON.stringify(sample.center)}
-        Random samples: ${JSON.stringify(sample.random)}
-      `);
-    } catch (error) {
-      console.error(
-        `[AnnualFluxProcessor] Error logging raster samples: ${error.message}`
-      );
-    }
-  }
-
-  /**
-   * Diagnostic function: Analyze row distribution
-   * @param {Array} data - Data array
-   * @param {number} width - Image width
-   * @param {number} height - Image height
-   * @param {string} label - Label for logging
-   */
-  analyzeRowDistribution(data, width, height, label) {
-    const rowStats = [];
-    const noDataValue = config.processing.NO_DATA_VALUE || -9999;
-
-    // Sample rows at regular intervals
-    for (let y = 0; y < height; y += Math.max(1, Math.floor(height / 20))) {
-      const row = Math.floor(y);
-      let validCount = 0,
-        sum = 0;
-      let minVal = Infinity,
-        maxVal = -Infinity;
-
-      // Analyze entire row
-      for (let x = 0; x < width; x++) {
-        const val = data[row * width + x];
-        if (val !== noDataValue && !isNaN(val)) {
-          validCount++;
-          sum += val;
-          minVal = Math.min(minVal, val);
-          maxVal = Math.max(maxVal, val);
-        }
-      }
-
-      const avgVal = validCount > 0 ? (sum / validCount).toFixed(2) : "N/A";
-      const validPercent = ((validCount / width) * 100).toFixed(1);
-      const valRange =
-        validCount > 0 ? `${minVal.toFixed(1)}-${maxVal.toFixed(1)}` : "N/A";
-
-      rowStats.push(
-        `Row ${row}: ${validCount}/${width} valid pixels (${validPercent}%), Avg: ${avgVal}, Range: ${valRange}`
-      );
-    }
-
-    console.log(`[DEBUG] ${label} Distribution:\n${rowStats.join("\n")}`);
   }
 }
 

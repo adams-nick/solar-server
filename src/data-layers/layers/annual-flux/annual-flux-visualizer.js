@@ -74,11 +74,6 @@ class AnnualFluxVisualizer extends Visualizer {
         console.log(
           `[AnnualFluxVisualizer] Processing data with dimensions: ${width}x${height}`
         );
-        console.log(
-          `[AnnualFluxVisualizer] Building boundaries: ${JSON.stringify(
-            buildingBoundaries
-          )}`
-        );
 
         // Set visualization options
         const buildingFocus = options.buildingFocus !== false;

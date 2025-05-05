@@ -37,7 +37,7 @@ router.post("/", async (req, res) => {
     const {
       location,
       radius = 50,
-      layerType = "annualFlux",
+      layerType = "annualFlux", // Default to annualFlux
       buildingFocus = true,
     } = req.body;
 

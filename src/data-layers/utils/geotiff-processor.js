@@ -1,6 +1,5 @@
 /**
  * GeoTIFF processing utility for SolarScanner data layers
- * Based on Google's implementation pattern
  */
 
 const geotiff = require("geotiff");
@@ -16,11 +15,7 @@ class GeoTiffProcessor {
    */
   async process(buffer, options = {}) {
     try {
-      // Log processing start with options
-      console.log(
-        `[GeoTiffProcessor] Processing GeoTIFF with options:`,
-        options
-      );
+      console.log("[GeoTiffProcessor] Processing GeoTIFF");
 
       // Validate buffer type and content
       this.validateBuffer(buffer);
@@ -31,9 +26,6 @@ class GeoTiffProcessor {
       // Parse the GeoTIFF
       const tiff = await geotiff.fromArrayBuffer(arrayBuffer);
       const imageCount = await tiff.getImageCount();
-      console.log(
-        `[GeoTiffProcessor] GeoTIFF contains ${imageCount} images/pages`
-      );
 
       // Get the image (default to first page if not specified)
       const pageIndex = options.page || 0;
@@ -56,15 +48,6 @@ class GeoTiffProcessor {
         );
       }
 
-      // Log image characteristics
-      console.log(`[GeoTiffProcessor] Image dimensions: ${width}x${height}`);
-      console.log(
-        `[GeoTiffProcessor] Samples per pixel: ${image.getSamplesPerPixel()}`
-      );
-      console.log(
-        `[GeoTiffProcessor] Bits per sample: ${fileDirectory.BitsPerSample[0]}`
-      );
-
       // Configure raster reading options
       const readOptions = {};
       if (options.samples) {
@@ -78,10 +61,6 @@ class GeoTiffProcessor {
       }
 
       // Read the raster data
-      console.log(
-        `[GeoTiffProcessor] Reading rasters with options:`,
-        readOptions
-      );
       const rasters = await image.readRasters(readOptions);
 
       // Process rasters based on options
@@ -91,9 +70,6 @@ class GeoTiffProcessor {
         const raster = options.convertToArray
           ? Array.from(rasters[i])
           : rasters[i];
-
-        // Sample and log raster values for verification
-        this.logRasterSamples(raster, i, width, height);
 
         processedRasters.push(raster);
       }
@@ -150,15 +126,6 @@ class GeoTiffProcessor {
     if (buffer.byteLength === 0) {
       throw new Error("Buffer is empty (zero length)");
     }
-
-    // Log buffer info for debugging
-    console.log(`[GeoTiffProcessor] Buffer info:
-      Type: ${typeof buffer}
-      Is Buffer: ${buffer instanceof Buffer}
-      Is ArrayBuffer: ${buffer instanceof ArrayBuffer}
-      Is Uint8Array: ${buffer instanceof Uint8Array}
-      Length: ${buffer.byteLength || buffer.length || "unknown"}
-    `);
   }
 
   /**
@@ -178,64 +145,6 @@ class GeoTiffProcessor {
     } else {
       throw new Error(`Cannot convert ${typeof buffer} to ArrayBuffer`);
     }
-  }
-
-  /**
-   * Log sample values from raster for debugging
-   * @private
-   * @param {TypedArray|Array} raster - Raster data
-   * @param {number} index - Raster index
-   * @param {number} width - Image width
-   * @param {number} height - Image height
-   */
-  logRasterSamples(raster, index, width, height) {
-    if (!raster || raster.length === 0) return;
-
-    // Sample different regions of the raster
-    const centerY = Math.floor(height / 2);
-    const centerX = Math.floor(width / 2);
-
-    // Get top-left, center, and random samples
-    const samples = {
-      topLeft: raster[0],
-      topRight: raster[width - 1],
-      center: raster[centerY * width + centerX],
-      bottomLeft: raster[(height - 1) * width],
-      bottomRight: raster[(height - 1) * width + (width - 1)],
-    };
-
-    // Sample row averages
-    const rowSamples = [];
-    for (
-      let row = 0;
-      row < height;
-      row += Math.max(1, Math.floor(height / 10))
-    ) {
-      let sum = 0;
-      let count = 0;
-
-      for (let x = 0; x < width; x++) {
-        const value = raster[row * width + x];
-        if (value !== undefined && !isNaN(value)) {
-          sum += value;
-          count++;
-        }
-      }
-
-      rowSamples.push({
-        row,
-        avg: count > 0 ? sum / count : NaN,
-      });
-    }
-
-    // Log samples
-    console.log(`[GeoTiffProcessor] Raster ${index} samples:`, samples);
-    console.log(`[GeoTiffProcessor] Row average samples:`);
-    rowSamples.forEach((sample) => {
-      if (!isNaN(sample.avg)) {
-        console.log(`  Row ${sample.row}: ${sample.avg.toFixed(2)}`);
-      }
-    });
   }
 
   /**
