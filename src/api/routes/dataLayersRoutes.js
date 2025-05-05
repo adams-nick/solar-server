@@ -200,4 +200,86 @@ router.post("/rgb", async (req, res) => {
   }
 });
 
+// Add a specific endpoint just for hourly shade layer
+router.post("/hourly-shade", async (req, res) => {
+  try {
+    const {
+      location,
+      radius = 50,
+      buildingFocus = true,
+      month = 0, // Default to January
+      day = 15, // Default to middle of month
+    } = req.body;
+
+    if (!location || !location.latitude || !location.longitude) {
+      return res.status(400).json({ error: "Invalid location data" });
+    }
+
+    if (month < 0 || month > 11) {
+      return res.status(400).json({ error: "Month must be between 0 and 11" });
+    }
+
+    if (day < 1 || day > 31) {
+      return res.status(400).json({ error: "Day must be between 1 and 31" });
+    }
+
+    console.log(
+      `Processing hourly shade for location: ${location.latitude}, ${location.longitude}, month: ${month}, day: ${day}`
+    );
+
+    try {
+      // Process hourly shade layer
+      const result = await layerManager.processLayer("hourlyShade", location, {
+        radius,
+        buildingFocus,
+        month,
+        day,
+        fallbackToSynthetic: false,
+      });
+
+      // Return hourly shade visualizations
+      return res.json({
+        imageryQuality: result.metadata?.imageryQuality || "MEDIUM",
+        hourlyDataUrls: Array.isArray(result.visualization)
+          ? result.visualization
+          : [result.visualization],
+        layerType: "hourlyShade",
+        metadata: {
+          ...result.metadata,
+          month,
+          day,
+          dimensions: result.metadata.dimensions,
+          hasMask: result.metadata.hasMask,
+        },
+        bounds: result.bounds,
+      });
+    } catch (error) {
+      // Handle specific errors
+      if (
+        error.message &&
+        (error.message.includes("empty data") ||
+          error.message.includes("no data available") ||
+          error.message.includes("Received empty data") ||
+          error.message.includes("not available for this location"))
+      ) {
+        return res.status(404).json({
+          error: "No hourly shade data available for this location",
+          details: error.message,
+          location,
+        });
+      }
+
+      throw error;
+    }
+  } catch (error) {
+    console.error("Hourly shade data layer error:", error);
+
+    // Return error response
+    res.status(500).json({
+      error: error.message || "Failed to fetch hourly shade data",
+      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
+    });
+  }
+});
+
 module.exports = router;
