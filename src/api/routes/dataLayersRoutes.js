@@ -134,7 +134,7 @@ router.post("/", async (req, res) => {
 // Dedicated POST endpoint for RGB layer
 router.post("/rgb", async (req, res) => {
   try {
-    const { location, radius = 50, buildingFocus = true } = req.body;
+    const { location, radius = 50 } = req.body;
 
     if (!location || !location.latitude || !location.longitude) {
       return res.status(400).json({ error: "Invalid location data" });
@@ -145,17 +145,22 @@ router.post("/rgb", async (req, res) => {
     );
 
     try {
-      // Process RGB layer
+      // Process RGB layer - buildingFocus will be handled internally
       const result = await layerManager.processLayer("rgb", location, {
         radius,
-        buildingFocus,
         fallbackToSynthetic: false,
       });
 
-      // Simple, consistent response format
+      // The visualization will now contain both building focus and full image URLs
+      const visualizations = result.visualization;
+
+      // Return both sets of URLs
       return res.json({
         imageryQuality: result.metadata?.imageryQuality || "MEDIUM",
-        dataUrl: result.visualization, // Single data URL
+        dataUrls: {
+          buildingFocus: visualizations.buildingFocus,
+          fullImage: visualizations.fullImage,
+        },
         layerType: "rgb",
         metadata: {
           ...result.metadata,
@@ -206,7 +211,6 @@ router.post("/hourly-shade", async (req, res) => {
     const {
       location,
       radius = 50,
-      buildingFocus = true,
       month = 0, // Default to January
       day = 15, // Default to middle of month
     } = req.body;
@@ -228,21 +232,24 @@ router.post("/hourly-shade", async (req, res) => {
     );
 
     try {
-      // Process hourly shade layer
+      // Process hourly shade layer - buildingFocus will be handled internally
       const result = await layerManager.processLayer("hourlyShade", location, {
         radius,
-        buildingFocus,
         month,
         day,
         fallbackToSynthetic: false,
       });
 
-      // Return hourly shade visualizations
+      // The visualization will now contain both building focus and full image URLs
+      const visualizations = result.visualization;
+
+      // Return both sets of visualizations
       return res.json({
         imageryQuality: result.metadata?.imageryQuality || "MEDIUM",
-        hourlyDataUrls: Array.isArray(result.visualization)
-          ? result.visualization
-          : [result.visualization],
+        hourlyDataUrls: {
+          buildingFocus: visualizations.buildingFocus,
+          fullImage: visualizations.fullImage,
+        },
         layerType: "hourlyShade",
         metadata: {
           ...result.metadata,
@@ -254,7 +261,7 @@ router.post("/hourly-shade", async (req, res) => {
         bounds: result.bounds,
       });
     } catch (error) {
-      // Handle specific errors
+      // Handle specific errors as before
       if (
         error.message &&
         (error.message.includes("empty data") ||
@@ -268,13 +275,10 @@ router.post("/hourly-shade", async (req, res) => {
           location,
         });
       }
-
       throw error;
     }
   } catch (error) {
     console.error("Hourly shade data layer error:", error);
-
-    // Return error response
     res.status(500).json({
       error: error.message || "Failed to fetch hourly shade data",
       stack: process.env.NODE_ENV === "development" ? error.stack : undefined,

@@ -59,7 +59,6 @@ class HourlyShadeVisualizer extends Visualizer {
         const { width, height } = metadata.dimensions || metadata;
 
         // Set visualization options
-        const buildingFocus = options.buildingFocus !== false;
         const maxDimension =
           options.maxDimension || config.visualization.MAX_DIMENSION;
 
@@ -76,8 +75,9 @@ class HourlyShadeVisualizer extends Visualizer {
           palette = ColorPalettes.getPalette(paletteName);
         }
 
-        // Prepare result array
-        const visualizations = [];
+        // Prepare result arrays - one for building focus, one for full image
+        const buildingFocusVisualizations = [];
+        const fullImageVisualizations = [];
 
         // Filter hours to process
         const hoursToProcess = specificHour
@@ -94,141 +94,58 @@ class HourlyShadeVisualizer extends Visualizer {
             // Get the raster data for this hour
             const shadeRaster = hourData.raster;
 
-            // Determine dimensions and cropping
-            let outputWidth, outputHeight, startX, startY;
-            let croppedData;
-
-            if (buildingFocus && buildingBoundaries?.hasBuilding) {
-              // Use building boundaries for cropping
-              console.log(
-                "[HourlyShadeVisualizer] Using building focus for visualization"
-              );
-
-              const {
-                minX,
-                minY,
-                width: bWidth,
-                height: bHeight,
-              } = buildingBoundaries;
-              startX = minX;
-              startY = minY;
-              outputWidth = bWidth;
-              outputHeight = bHeight;
-
-              // Create cropped data array
-              croppedData = new Array(outputWidth * outputHeight);
-              for (let y = 0; y < outputHeight; y++) {
-                for (let x = 0; x < outputWidth; x++) {
-                  const srcIdx = (startY + y) * width + (startX + x);
-                  const destIdx = y * outputWidth + x;
-                  croppedData[destIdx] = shadeRaster[srcIdx];
-                }
-              }
-            } else {
-              // Use full image
-              console.log(
-                "[HourlyShadeVisualizer] Using full image for visualization"
-              );
-              startX = 0;
-              startY = 0;
-              outputWidth = width;
-              outputHeight = height;
-              croppedData = shadeRaster;
-            }
-
-            // Apply max dimension limit if needed
-            if (outputWidth > maxDimension || outputHeight > maxDimension) {
-              const aspectRatio = outputWidth / outputHeight;
-              if (outputWidth > outputHeight) {
-                outputWidth = maxDimension;
-                outputHeight = Math.round(maxDimension / aspectRatio);
-              } else {
-                outputHeight = maxDimension;
-                outputWidth = Math.round(maxDimension * aspectRatio);
-              }
-              console.log(
-                `[HourlyShadeVisualizer] Resized to ${outputWidth}x${outputHeight} to fit max dimension`
-              );
-            }
-
-            // Create a mask array for cropping if needed
-            let croppedMaskRaster = null;
-            if (
-              maskRaster &&
-              buildingFocus &&
-              buildingBoundaries?.hasBuilding
-            ) {
-              croppedMaskRaster = new Array(outputWidth * outputHeight);
-              for (let y = 0; y < outputHeight; y++) {
-                for (let x = 0; x < outputWidth; x++) {
-                  const srcIdx = (startY + y) * width + (startX + x);
-                  const destIdx = y * outputWidth + x;
-                  croppedMaskRaster[destIdx] = maskRaster[srcIdx];
-                }
-              }
-            }
-
-            // Create canvas and context
-            const { canvas, ctx } = this.createEmptyCanvas(
-              outputWidth,
-              outputHeight
+            // First create full image visualization
+            // ---------------
+            const fullImageDataUrl = await this.createHourVisualization(
+              shadeRaster,
+              width,
+              height,
+              maskRaster,
+              null, // No building boundaries for full image
+              palette,
+              maxDimension,
+              false // Not building focused
             );
 
-            // Create image data
-            const imageData = ctx.createImageData(outputWidth, outputHeight);
-
-            // Fill the image data
-            for (let y = 0; y < outputHeight; y++) {
-              for (let x = 0; x < outputWidth; x++) {
-                const idx = y * outputWidth + x;
-                const destIdx = (y * outputWidth + x) * 4;
-
-                // Get shade value (0 = shade, 1 = sun)
-                const shadeValue = croppedData[idx];
-
-                // Apply mask if available
-                const useMask =
-                  maskRaster &&
-                  buildingFocus &&
-                  buildingBoundaries?.hasBuilding;
-                const isMasked = useMask && croppedMaskRaster[idx] > 0;
-
-                // Set color based on shade value
-                const colorIndex = shadeValue ? palette.length - 1 : 0;
-                const color = palette[colorIndex];
-
-                imageData.data[destIdx] = color.r; // Red
-                imageData.data[destIdx + 1] = color.g; // Green
-                imageData.data[destIdx + 2] = color.b; // Blue
-
-                // Set alpha (transparency)
-                if (useMask) {
-                  imageData.data[destIdx + 3] = isMasked ? 255 : 0; // Transparent if not masked
-                } else {
-                  imageData.data[destIdx + 3] = 255; // Fully opaque
-                }
-              }
-            }
-
-            // Put the image data on the canvas
-            ctx.putImageData(imageData, 0, 0);
-
-            // Convert canvas to data URL
-            const dataUrl = this.canvasToDataURL(canvas, {
-              mimeType: "image/png",
-              quality: options.quality || config.visualization.PNG_QUALITY,
-            });
-
-            // Add metadata to the visualization
-            visualizations.push({
+            fullImageVisualizations.push({
               hour: hourData.hour,
               hourLabel: hourData.hourLabel,
-              dataUrl,
+              dataUrl: fullImageDataUrl,
               synthetic: false,
             });
 
+            // Then create building-focused visualization if building boundaries exist
+            // ---------------
+            if (buildingBoundaries?.hasBuilding) {
+              const buildingFocusDataUrl = await this.createHourVisualization(
+                shadeRaster,
+                width,
+                height,
+                maskRaster,
+                buildingBoundaries,
+                palette,
+                maxDimension,
+                true // Building focused
+              );
+
+              buildingFocusVisualizations.push({
+                hour: hourData.hour,
+                hourLabel: hourData.hourLabel,
+                dataUrl: buildingFocusDataUrl,
+                synthetic: false,
+              });
+            } else {
+              // If no building boundaries, use the full image for building focus as well
+              buildingFocusVisualizations.push({
+                hour: hourData.hour,
+                hourLabel: hourData.hourLabel,
+                dataUrl: fullImageDataUrl,
+                synthetic: false,
+              });
+            }
+
             console.log(
-              `[HourlyShadeVisualizer] Completed visualization for ${hourData.hourLabel}`
+              `[HourlyShadeVisualizer] Completed visualizations for ${hourData.hourLabel}`
             );
           } catch (error) {
             console.error(
@@ -239,14 +156,20 @@ class HourlyShadeVisualizer extends Visualizer {
         }
 
         console.log(
-          `[HourlyShadeVisualizer] Created ${visualizations.length} visualizations`
+          `[HourlyShadeVisualizer] Created ${hoursToProcess.length} visualizations in both formats`
         );
 
         // Return result based on request type
         if (specificHour) {
-          return visualizations[0]?.dataUrl;
+          return {
+            buildingFocus: buildingFocusVisualizations[0]?.dataUrl,
+            fullImage: fullImageVisualizations[0]?.dataUrl,
+          };
         } else {
-          return visualizations.map((v) => v.dataUrl);
+          return {
+            buildingFocus: buildingFocusVisualizations.map((v) => v.dataUrl),
+            fullImage: fullImageVisualizations.map((v) => v.dataUrl),
+          };
         }
       });
     } catch (error) {
@@ -256,6 +179,127 @@ class HourlyShadeVisualizer extends Visualizer {
         `Failed to visualize hourly shade data: ${error.message}`
       );
     }
+  }
+
+  // Helper method to create visualization for a single hour
+  async createHourVisualization(
+    shadeRaster,
+    width,
+    height,
+    maskRaster,
+    buildingBoundaries,
+    palette,
+    maxDimension,
+    buildingFocus
+  ) {
+    // Determine dimensions and cropping
+    let outputWidth, outputHeight, startX, startY;
+    let croppedData;
+
+    if (buildingFocus && buildingBoundaries?.hasBuilding) {
+      // Use building boundaries for cropping
+      console.log(
+        "[HourlyShadeVisualizer] Using building focus for visualization"
+      );
+
+      const { minX, minY, width: bWidth, height: bHeight } = buildingBoundaries;
+      startX = minX;
+      startY = minY;
+      outputWidth = bWidth;
+      outputHeight = bHeight;
+
+      // Create cropped data array
+      croppedData = new Array(outputWidth * outputHeight);
+      for (let y = 0; y < outputHeight; y++) {
+        for (let x = 0; x < outputWidth; x++) {
+          const srcIdx = (startY + y) * width + (startX + x);
+          const destIdx = y * outputWidth + x;
+          croppedData[destIdx] = shadeRaster[srcIdx];
+        }
+      }
+    } else {
+      // Use full image
+      console.log("[HourlyShadeVisualizer] Using full image for visualization");
+      startX = 0;
+      startY = 0;
+      outputWidth = width;
+      outputHeight = height;
+      croppedData = shadeRaster;
+    }
+
+    // Apply max dimension limit if needed
+    if (outputWidth > maxDimension || outputHeight > maxDimension) {
+      const aspectRatio = outputWidth / outputHeight;
+      if (outputWidth > outputHeight) {
+        outputWidth = maxDimension;
+        outputHeight = Math.round(maxDimension / aspectRatio);
+      } else {
+        outputHeight = maxDimension;
+        outputWidth = Math.round(maxDimension * aspectRatio);
+      }
+      console.log(
+        `[HourlyShadeVisualizer] Resized to ${outputWidth}x${outputHeight} to fit max dimension`
+      );
+    }
+
+    // Create a mask array for cropping if needed
+    let croppedMaskRaster = null;
+    if (maskRaster && buildingFocus && buildingBoundaries?.hasBuilding) {
+      croppedMaskRaster = new Array(outputWidth * outputHeight);
+      for (let y = 0; y < outputHeight; y++) {
+        for (let x = 0; x < outputWidth; x++) {
+          const srcIdx = (startY + y) * width + (startX + x);
+          const destIdx = y * outputWidth + x;
+          croppedMaskRaster[destIdx] = maskRaster[srcIdx];
+        }
+      }
+    }
+
+    // Create canvas and context
+    const { canvas, ctx } = this.createEmptyCanvas(outputWidth, outputHeight);
+
+    // Create image data
+    const imageData = ctx.createImageData(outputWidth, outputHeight);
+
+    // Fill the image data
+    for (let y = 0; y < outputHeight; y++) {
+      for (let x = 0; x < outputWidth; x++) {
+        const idx = y * outputWidth + x;
+        const destIdx = (y * outputWidth + x) * 4;
+
+        // Get shade value (0 = shade, 1 = sun)
+        const shadeValue = croppedData[idx];
+
+        // Apply mask if available
+        const useMask =
+          maskRaster && buildingFocus && buildingBoundaries?.hasBuilding;
+        const isMasked = useMask && croppedMaskRaster[idx] > 0;
+
+        // Set color based on shade value
+        const colorIndex = shadeValue ? palette.length - 1 : 0;
+        const color = palette[colorIndex];
+
+        imageData.data[destIdx] = color.r; // Red
+        imageData.data[destIdx + 1] = color.g; // Green
+        imageData.data[destIdx + 2] = color.b; // Blue
+
+        // Set alpha (transparency)
+        if (useMask) {
+          imageData.data[destIdx + 3] = isMasked ? 255 : 0; // Transparent if not masked
+        } else {
+          imageData.data[destIdx + 3] = 255; // Fully opaque
+        }
+      }
+    }
+
+    // Put the image data on the canvas
+    ctx.putImageData(imageData, 0, 0);
+
+    // Convert canvas to data URL
+    return this.canvasToDataURL(canvas, {
+      mimeType: "image/png",
+      quality: config.visualization.PNG_QUALITY,
+    });
   }
 }
 
