@@ -58,7 +58,20 @@ class MonthlyFluxVisualizer extends Visualizer {
           console.log(
             "[MonthlyFluxVisualizer] Creating synthetic visualization"
           );
-          return this.createSyntheticVisualizations(options);
+          const syntheticData = this.createSyntheticVisualizations(options);
+
+          // Format synthetic data to provide both building focus and full image
+          if (Array.isArray(syntheticData)) {
+            return {
+              buildingFocus: syntheticData,
+              fullImage: syntheticData,
+            };
+          } else {
+            return {
+              buildingFocus: syntheticData,
+              fullImage: syntheticData,
+            };
+          }
         }
 
         // Validate processed data
@@ -70,7 +83,6 @@ class MonthlyFluxVisualizer extends Visualizer {
         const { width, height } = metadata.dimensions;
 
         // Set visualization options
-        const buildingFocus = options.buildingFocus !== false;
         const maxDimension =
           options.maxDimension || config.visualization.MAX_DIMENSION;
         const applySeasonalAdjustment =
@@ -89,8 +101,9 @@ class MonthlyFluxVisualizer extends Visualizer {
           palette = ColorPalettes.getPalette(paletteName);
         }
 
-        // Prepare result array
-        const visualizations = [];
+        // Prepare result arrays for both building focus and full image
+        const buildingFocusVisualizations = [];
+        const fullImageVisualizations = [];
 
         // Filter months to process
         const monthsToProcess = specificMonth
@@ -107,117 +120,72 @@ class MonthlyFluxVisualizer extends Visualizer {
             // Get the raster data for this month
             const fluxRaster = monthData.raster;
 
-            // Determine dimensions and cropping
-            let outputWidth, outputHeight, startX, startY;
-            let croppedData;
-
-            if (buildingFocus && buildingBoundaries?.hasBuilding) {
-              // Use building boundaries for cropping
-              console.log(
-                "[MonthlyFluxVisualizer] Using building focus for visualization"
-              );
-
-              const {
-                minX,
-                minY,
-                width: bWidth,
-                height: bHeight,
-              } = buildingBoundaries;
-              startX = minX;
-              startY = minY;
-              outputWidth = bWidth;
-              outputHeight = bHeight;
-
-              // Create cropped data array
-              croppedData = new Array(outputWidth * outputHeight);
-              for (let y = 0; y < outputHeight; y++) {
-                for (let x = 0; x < outputWidth; x++) {
-                  const srcIdx = (startY + y) * width + (startX + x);
-                  const destIdx = y * outputWidth + x;
-                  croppedData[destIdx] = fluxRaster[srcIdx];
-                }
-              }
-            } else {
-              // Use full image
-              console.log(
-                "[MonthlyFluxVisualizer] Using full image for visualization"
-              );
-              startX = 0;
-              startY = 0;
-              outputWidth = width;
-              outputHeight = height;
-              croppedData = fluxRaster;
-            }
-
-            // Apply max dimension limit if needed
-            if (outputWidth > maxDimension || outputHeight > maxDimension) {
-              const aspectRatio = outputWidth / outputHeight;
-              if (outputWidth > outputHeight) {
-                outputWidth = maxDimension;
-                outputHeight = Math.round(maxDimension / aspectRatio);
-              } else {
-                outputHeight = maxDimension;
-                outputWidth = Math.round(maxDimension * aspectRatio);
-              }
-              console.log(
-                `[MonthlyFluxVisualizer] Resized to ${outputWidth}x${outputHeight} to fit max dimension`
-              );
-            }
-
-            // Get data range for normalization
-            let min = monthData.dataRange?.min || 0;
-            let max = monthData.dataRange?.max || 200; // Default is typical for kWh/kW/month
-
-            // Apply seasonal adjustment if requested
-            let seasonalFactor = 1;
-            if (applySeasonalAdjustment) {
-              seasonalFactor =
-                monthData.seasonalFactor ||
-                VisualizationUtils.getSeasonalFactor(monthData.month);
-
-              console.log(
-                `[MonthlyFluxVisualizer] Applied seasonal factor ${seasonalFactor.toFixed(
-                  2
-                )} for ${monthData.monthName}`
-              );
-            }
-
-            // Create canvas for this month
-            const canvas = VisualizationUtils.createCanvas(
-              croppedData,
-              outputWidth,
-              outputHeight,
+            // First create full image version
+            const fullImageDataUrl = await this.createMonthVisualization(
+              fluxRaster,
+              width,
+              height,
+              maskRaster,
+              null, // No building boundaries for full image
               palette,
-              {
-                min,
-                max,
-                // Apply seasonal factor to each value by providing a transform function
-                valueTransform: applySeasonalAdjustment
-                  ? (val) => val * seasonalFactor
-                  : undefined,
-                // Use alpha for non-building areas
-                useAlpha: true,
-              }
+              maxDimension,
+              monthData,
+              applySeasonalAdjustment,
+              false // Not building focused
             );
 
-            // Convert to data URL
-            const dataUrl = VisualizationUtils.canvasToDataURL(canvas, {
-              mimeType: "image/png",
-              quality: options.quality || config.visualization.PNG_QUALITY,
-            });
-
-            // Add metadata to the visualization
-            visualizations.push({
+            fullImageVisualizations.push({
               month: monthData.month,
               monthName: monthData.monthName,
-              dataUrl,
+              dataUrl: fullImageDataUrl,
               seasonal: applySeasonalAdjustment,
-              seasonalFactor,
+              seasonalFactor:
+                monthData.seasonalFactor ||
+                VisualizationUtils.getSeasonalFactor(monthData.month),
               synthetic: false,
             });
 
+            // Then create building-focused version if building boundaries exist
+            if (buildingBoundaries?.hasBuilding) {
+              const buildingFocusDataUrl = await this.createMonthVisualization(
+                fluxRaster,
+                width,
+                height,
+                maskRaster,
+                buildingBoundaries,
+                palette,
+                maxDimension,
+                monthData,
+                applySeasonalAdjustment,
+                true // Building focused
+              );
+
+              buildingFocusVisualizations.push({
+                month: monthData.month,
+                monthName: monthData.monthName,
+                dataUrl: buildingFocusDataUrl,
+                seasonal: applySeasonalAdjustment,
+                seasonalFactor:
+                  monthData.seasonalFactor ||
+                  VisualizationUtils.getSeasonalFactor(monthData.month),
+                synthetic: false,
+              });
+            } else {
+              // If no building boundaries, use the full image for building focus as well
+              buildingFocusVisualizations.push({
+                month: monthData.month,
+                monthName: monthData.monthName,
+                dataUrl: fullImageDataUrl,
+                seasonal: applySeasonalAdjustment,
+                seasonalFactor:
+                  monthData.seasonalFactor ||
+                  VisualizationUtils.getSeasonalFactor(monthData.month),
+                synthetic: false,
+              });
+            }
+
             console.log(
-              `[MonthlyFluxVisualizer] Completed visualization for ${monthData.monthName}`
+              `[MonthlyFluxVisualizer] Completed visualizations for ${monthData.monthName}`
             );
           } catch (error) {
             console.error(
@@ -232,7 +200,8 @@ class MonthlyFluxVisualizer extends Visualizer {
               options.location
             );
 
-            visualizations.push({
+            // Add the same synthetic fallback to both arrays
+            const syntheticData = {
               month: monthData.month,
               monthName: monthData.monthName,
               dataUrl: syntheticDataUrl,
@@ -242,19 +211,28 @@ class MonthlyFluxVisualizer extends Visualizer {
                 VisualizationUtils.getSeasonalFactor(monthData.month),
               synthetic: true,
               error: error.message,
-            });
+            };
+
+            buildingFocusVisualizations.push(syntheticData);
+            fullImageVisualizations.push(syntheticData);
           }
         }
 
         console.log(
-          `[MonthlyFluxVisualizer] Created ${visualizations.length} visualizations`
+          `[MonthlyFluxVisualizer] Created ${monthsToProcess.length} visualizations in both formats`
         );
 
         // Return result based on request type
         if (specificMonth) {
-          return visualizations[0].dataUrl;
+          return {
+            buildingFocus: buildingFocusVisualizations[0]?.dataUrl,
+            fullImage: fullImageVisualizations[0]?.dataUrl,
+          };
         } else {
-          return visualizations.map((v) => v.dataUrl);
+          return {
+            buildingFocus: buildingFocusVisualizations.map((v) => v.dataUrl),
+            fullImage: fullImageVisualizations.map((v) => v.dataUrl),
+          };
         }
       });
     } catch (error) {
@@ -265,7 +243,8 @@ class MonthlyFluxVisualizer extends Visualizer {
         specificMonth: options.month !== undefined,
       };
 
-      return this.handleVisualizationError(
+      // Create fallback and structure it in the new format
+      const fallback = await this.handleVisualizationError(
         error,
         "visualize",
         {
@@ -276,7 +255,126 @@ class MonthlyFluxVisualizer extends Visualizer {
         },
         { createFallback: true, fallbackOptions }
       );
+
+      // Structure the fallback in the same format as successful visualizations
+      if (options.month !== undefined) {
+        return {
+          buildingFocus: fallback,
+          fullImage: fallback,
+        };
+      } else {
+        return {
+          buildingFocus: Array.isArray(fallback) ? fallback : [fallback],
+          fullImage: Array.isArray(fallback) ? fallback : [fallback],
+        };
+      }
     }
+  }
+
+  // Helper method to create visualization for a single month
+  async createMonthVisualization(
+    fluxRaster,
+    width,
+    height,
+    maskRaster,
+    buildingBoundaries,
+    palette,
+    maxDimension,
+    monthData,
+    applySeasonalAdjustment,
+    buildingFocus
+  ) {
+    // Determine dimensions and cropping
+    let outputWidth, outputHeight, startX, startY;
+    let croppedData;
+
+    if (buildingFocus && buildingBoundaries?.hasBuilding) {
+      // Use building boundaries for cropping
+      console.log(
+        "[MonthlyFluxVisualizer] Using building focus for visualization"
+      );
+
+      const { minX, minY, width: bWidth, height: bHeight } = buildingBoundaries;
+      startX = minX;
+      startY = minY;
+      outputWidth = bWidth;
+      outputHeight = bHeight;
+
+      // Create cropped data array
+      croppedData = new Array(outputWidth * outputHeight);
+      for (let y = 0; y < outputHeight; y++) {
+        for (let x = 0; x < outputWidth; x++) {
+          const srcIdx = (startY + y) * width + (startX + x);
+          const destIdx = y * outputWidth + x;
+          croppedData[destIdx] = fluxRaster[srcIdx];
+        }
+      }
+    } else {
+      // Use full image
+      console.log("[MonthlyFluxVisualizer] Using full image for visualization");
+      startX = 0;
+      startY = 0;
+      outputWidth = width;
+      outputHeight = height;
+      croppedData = fluxRaster;
+    }
+
+    // Apply max dimension limit if needed
+    if (outputWidth > maxDimension || outputHeight > maxDimension) {
+      const aspectRatio = outputWidth / outputHeight;
+      if (outputWidth > outputHeight) {
+        outputWidth = maxDimension;
+        outputHeight = Math.round(maxDimension / aspectRatio);
+      } else {
+        outputHeight = maxDimension;
+        outputWidth = Math.round(maxDimension * aspectRatio);
+      }
+      console.log(
+        `[MonthlyFluxVisualizer] Resized to ${outputWidth}x${outputHeight} to fit max dimension`
+      );
+    }
+
+    // Get data range for normalization
+    let min = monthData.dataRange?.min || 0;
+    let max = monthData.dataRange?.max || 200; // Default is typical for kWh/kW/month
+
+    // Apply seasonal adjustment if requested
+    let seasonalFactor = 1;
+    if (applySeasonalAdjustment) {
+      seasonalFactor =
+        monthData.seasonalFactor ||
+        VisualizationUtils.getSeasonalFactor(monthData.month);
+
+      console.log(
+        `[MonthlyFluxVisualizer] Applied seasonal factor ${seasonalFactor.toFixed(
+          2
+        )} for ${monthData.monthName}`
+      );
+    }
+
+    // Create canvas for this month
+    const canvas = VisualizationUtils.createCanvas(
+      croppedData,
+      outputWidth,
+      outputHeight,
+      palette,
+      {
+        min,
+        max,
+        // Apply seasonal factor to each value by providing a transform function
+        valueTransform: applySeasonalAdjustment
+          ? (val) => val * seasonalFactor
+          : undefined,
+        // Use alpha for non-building areas
+        useAlpha: true,
+      }
+    );
+
+    // Convert to data URL
+    return VisualizationUtils.canvasToDataURL(canvas, {
+      mimeType: "image/png",
+      quality: config.visualization.PNG_QUALITY,
+    });
   }
 
   /**

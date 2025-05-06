@@ -45,9 +45,16 @@ class AnnualFluxVisualizer extends Visualizer {
           );
           const syntheticUrl = this.createSyntheticVisualization(options);
           return {
-            rawFlux: syntheticUrl,
-            mask: syntheticUrl,
-            maskedFlux: syntheticUrl,
+            buildingFocus: {
+              rawFlux: syntheticUrl,
+              mask: syntheticUrl,
+              maskedFlux: syntheticUrl,
+            },
+            fullImage: {
+              rawFlux: syntheticUrl,
+              mask: syntheticUrl,
+              maskedFlux: syntheticUrl,
+            },
           };
         }
 
@@ -75,11 +82,6 @@ class AnnualFluxVisualizer extends Visualizer {
           `[AnnualFluxVisualizer] Processing data with dimensions: ${width}x${height}`
         );
 
-        // Set visualization options
-        const buildingFocus = options.buildingFocus !== false;
-        const maxDimension =
-          options.maxDimension || config.visualization.MAX_DIMENSION || 400;
-
         // Determine the color palette
         const palette =
           options.palette ||
@@ -92,10 +94,11 @@ class AnnualFluxVisualizer extends Visualizer {
           } palette for visualization`
         );
 
-        // Create visualization results object
-        const visualizationResults = {};
+        // Create results for both building focus and full image
+        const buildingFocusResults = {};
+        const fullImageResults = {};
 
-        // 1. Create raw flux visualization
+        // 1. Create raw flux visualization (same for both views)
         const rawFluxCanvas = VisualizationUtils.createCanvas(
           originalFluxRaster || fluxRaster,
           width,
@@ -109,11 +112,13 @@ class AnnualFluxVisualizer extends Visualizer {
           }
         );
 
-        visualizationResults.rawFlux =
-          VisualizationUtils.canvasToDataURL(rawFluxCanvas);
+        const rawFluxUrl = VisualizationUtils.canvasToDataURL(rawFluxCanvas);
+        buildingFocusResults.rawFlux = rawFluxUrl;
+        fullImageResults.rawFlux = rawFluxUrl;
+
         console.log("[AnnualFluxVisualizer] Created raw flux visualization");
 
-        // 2. Create mask visualization
+        // 2. Create mask visualization (same for both views)
         if (maskRaster) {
           const maskCanvas = VisualizationUtils.createCanvas(
             maskRaster,
@@ -127,110 +132,60 @@ class AnnualFluxVisualizer extends Visualizer {
             }
           );
 
-          visualizationResults.mask =
-            VisualizationUtils.canvasToDataURL(maskCanvas);
+          const maskUrl = VisualizationUtils.canvasToDataURL(maskCanvas);
+          buildingFocusResults.mask = maskUrl;
+          fullImageResults.mask = maskUrl;
+
           console.log("[AnnualFluxVisualizer] Created mask visualization");
         } else {
-          visualizationResults.mask = null;
+          buildingFocusResults.mask = null;
+          fullImageResults.mask = null;
           console.log("[AnnualFluxVisualizer] No mask data available");
         }
 
-        // 3. Create masked flux visualization
-        // Determine dimensions and cropping for masked flux
-        let outputWidth, outputHeight, startX, startY;
-        let dataToVisualize;
+        // 3. Create masked flux visualization - full image version
+        const fullImageUrl = await this.createMaskedFluxVisualization(
+          fluxRaster,
+          width,
+          height,
+          maskRaster,
+          null, // No building boundaries for full image
+          palette,
+          config.visualization.MAX_DIMENSION,
+          metadata.dataRange?.max || 1800,
+          false // Not building focused
+        );
 
-        if (buildingFocus && buildingBoundaries?.hasBuilding) {
-          // Use building boundaries for cropping
-          console.log(
-            "[AnnualFluxVisualizer] Using building focus for visualization"
-          );
+        fullImageResults.maskedFlux = fullImageUrl;
 
-          // Extract boundaries
-          const {
-            minX,
-            minY,
-            width: bWidth,
-            height: bHeight,
-          } = buildingBoundaries;
-
-          startX = minX;
-          startY = minY;
-          outputWidth = bWidth;
-          outputHeight = bHeight;
-
-          // Crop the data
-          const cropResult = VisualizationUtils.cropData(
+        // 4. Create masked flux visualization - building focus version
+        let buildingFocusUrl;
+        if (buildingBoundaries?.hasBuilding) {
+          buildingFocusUrl = await this.createMaskedFluxVisualization(
             fluxRaster,
             width,
             height,
-            {
-              minX: startX,
-              minY: startY,
-              width: outputWidth,
-              height: outputHeight,
-            }
+            maskRaster,
+            buildingBoundaries,
+            palette,
+            config.visualization.MAX_DIMENSION,
+            metadata.dataRange?.max || 1800,
+            true // Building focused
           );
-
-          dataToVisualize = cropResult.data;
         } else {
-          // Use full image
-          console.log(
-            "[AnnualFluxVisualizer] Using full image for visualization"
-          );
-          startX = 0;
-          startY = 0;
-          outputWidth = width;
-          outputHeight = height;
-          dataToVisualize = fluxRaster;
+          buildingFocusUrl = fullImageUrl; // Fallback to full image if no building
         }
 
-        // Apply max dimension limit if needed
-        if (outputWidth > maxDimension || outputHeight > maxDimension) {
-          const aspectRatio = outputWidth / outputHeight;
-          if (outputWidth > outputHeight) {
-            outputWidth = maxDimension;
-            outputHeight = Math.round(maxDimension / aspectRatio);
-          } else {
-            outputHeight = maxDimension;
-            outputWidth = Math.round(maxDimension * aspectRatio);
-          }
-          console.log(
-            `[AnnualFluxVisualizer] Resized to ${outputWidth}x${outputHeight} to fit max dimension`
-          );
-        }
+        buildingFocusResults.maskedFlux = buildingFocusUrl;
 
-        // Use fixed range or dynamically calculated range
-        const min = 0; // Always start from 0
-        const max = metadata.dataRange?.max || 1800;
-
-        console.log(
-          `[AnnualFluxVisualizer] Using data range: min=${min}, max=${max}`
-        );
-
-        // Create masked flux visualization
-        const maskedFluxCanvas = VisualizationUtils.createCanvas(
-          dataToVisualize,
-          outputWidth,
-          outputHeight,
-          palette,
-          {
-            min,
-            max,
-            useAlpha: true,
-            noDataValue: config.processing.NO_DATA_VALUE,
-          }
-        );
-
-        visualizationResults.maskedFlux =
-          VisualizationUtils.canvasToDataURL(maskedFluxCanvas);
-        console.log("[AnnualFluxVisualizer] Created masked flux visualization");
-
-        // Return all visualizations
+        // Return all visualizations in both formats
         console.log(
           "[AnnualFluxVisualizer] Annual flux visualization complete"
         );
-        return visualizationResults;
+        return {
+          buildingFocus: buildingFocusResults,
+          fullImage: fullImageResults,
+        };
       });
     } catch (error) {
       console.error(
@@ -244,13 +199,112 @@ class AnnualFluxVisualizer extends Visualizer {
         location: options.location,
       });
 
-      return {
+      const fallbackResult = {
         rawFlux: syntheticUrl,
         mask: syntheticUrl,
         maskedFlux: syntheticUrl,
         error: error.message,
       };
+
+      return {
+        buildingFocus: fallbackResult,
+        fullImage: fallbackResult,
+      };
     }
+  }
+
+  // Helper method to create masked flux visualization
+  async createMaskedFluxVisualization(
+    fluxRaster,
+    width,
+    height,
+    maskRaster,
+    buildingBoundaries,
+    palette,
+    maxDimension,
+    maxValue,
+    buildingFocus
+  ) {
+    // Determine dimensions and cropping
+    let outputWidth, outputHeight, startX, startY;
+    let dataToVisualize;
+
+    if (buildingFocus && buildingBoundaries?.hasBuilding) {
+      // Use building boundaries for cropping
+      console.log(
+        "[AnnualFluxVisualizer] Using building focus for visualization"
+      );
+
+      // Extract boundaries
+      const { minX, minY, width: bWidth, height: bHeight } = buildingBoundaries;
+
+      startX = minX;
+      startY = minY;
+      outputWidth = bWidth;
+      outputHeight = bHeight;
+
+      // Crop the data
+      const cropResult = VisualizationUtils.cropData(
+        fluxRaster,
+        width,
+        height,
+        {
+          minX: startX,
+          minY: startY,
+          width: outputWidth,
+          height: outputHeight,
+        }
+      );
+
+      dataToVisualize = cropResult.data;
+    } else {
+      // Use full image
+      console.log("[AnnualFluxVisualizer] Using full image for visualization");
+      startX = 0;
+      startY = 0;
+      outputWidth = width;
+      outputHeight = height;
+      dataToVisualize = fluxRaster;
+    }
+
+    // Apply max dimension limit if needed
+    if (outputWidth > maxDimension || outputHeight > maxDimension) {
+      const aspectRatio = outputWidth / outputHeight;
+      if (outputWidth > outputHeight) {
+        outputWidth = maxDimension;
+        outputHeight = Math.round(maxDimension / aspectRatio);
+      } else {
+        outputHeight = maxDimension;
+        outputWidth = Math.round(maxDimension * aspectRatio);
+      }
+      console.log(
+        `[AnnualFluxVisualizer] Resized to ${outputWidth}x${outputHeight} to fit max dimension`
+      );
+    }
+
+    // Use fixed range or dynamically calculated range
+    const min = 0; // Always start from 0
+    const max = maxValue;
+
+    console.log(
+      `[AnnualFluxVisualizer] Using data range: min=${min}, max=${max}`
+    );
+
+    // Create masked flux visualization
+    const maskedFluxCanvas = VisualizationUtils.createCanvas(
+      dataToVisualize,
+      outputWidth,
+      outputHeight,
+      palette,
+      {
+        min,
+        max,
+        useAlpha: true,
+        noDataValue: config.processing.NO_DATA_VALUE,
+      }
+    );
+
+    return VisualizationUtils.canvasToDataURL(maskedFluxCanvas);
   }
 
   /**

@@ -30,7 +30,6 @@ const layerManager = dataLayers.createLayerManager(apiClient, {
 
 // Test GET route for verification
 router.get("/", dataLayersController.testEndpoint);
-
 // POST endpoint to fetch data layers (for all layers except RGB)
 router.post("/", async (req, res) => {
   try {
@@ -38,7 +37,8 @@ router.post("/", async (req, res) => {
       location,
       radius = 50,
       layerType = "annualFlux", // Default to annualFlux
-      buildingFocus = true,
+      month, // For monthlyFlux
+      day, // For hourlyShade
     } = req.body;
 
     if (!location || !location.latitude || !location.longitude) {
@@ -61,45 +61,71 @@ router.post("/", async (req, res) => {
     );
 
     try {
-      // Process layer
-      const result = await layerManager.processLayer(layerType, location, {
+      // Process layer (buildingFocus will be handled by the visualizer)
+      const options = {
         radius,
-        buildingFocus,
         fallbackToSynthetic: false,
-      });
+      };
+
+      // Add month and day parameters if provided
+      if (month !== undefined) options.month = month;
+      if (day !== undefined) options.day = day;
+
+      const result = await layerManager.processLayer(
+        layerType,
+        location,
+        options
+      );
 
       // Format response based on layer type
       if (layerType === "monthlyFlux") {
         return res.json({
           imageryQuality: result.metadata?.imageryQuality || "MEDIUM",
-          visualizations: Array.isArray(result.visualization)
-            ? result.visualization
-            : [result.visualization],
-          monthlyDataUrls: Array.isArray(result.visualization)
-            ? result.visualization
-            : [result.visualization], // For compatibility with existing code
+          monthlyDataUrls: {
+            buildingFocus: result.visualization.buildingFocus || [],
+            fullImage: result.visualization.fullImage || [],
+          },
           layerType: "monthlyFlux",
           metadata: result.metadata,
         });
       } else if (layerType === "hourlyShade") {
         return res.json({
           imageryQuality: result.metadata?.imageryQuality || "MEDIUM",
-          visualizations: Array.isArray(result.visualization)
-            ? result.visualization
-            : [result.visualization],
-          hourlyDataUrls: Array.isArray(result.visualization)
-            ? result.visualization
-            : [result.visualization], // For compatibility with existing code
+          hourlyDataUrls: {
+            buildingFocus: result.visualization.buildingFocus || [],
+            fullImage: result.visualization.fullImage || [],
+          },
           layerType: "hourlyShade",
+          metadata: {
+            ...result.metadata,
+            month,
+            day,
+          },
+        });
+      } else if (layerType === "annualFlux") {
+        return res.json({
+          imageryQuality: result.metadata?.imageryQuality || "MEDIUM",
+          visualizations: result.visualization.buildingFocus, // For backward compatibility
+          dataUrls: {
+            buildingFocus: result.visualization.buildingFocus || {},
+            fullImage: result.visualization.fullImage || {},
+          },
+          layerType: "annualFlux",
           metadata: result.metadata,
         });
       } else {
-        // Generic response for other layer types (annualFlux, dsm, mask)
+        // Generic response for other layer types (dsm, mask)
         return res.json({
           imageryQuality: result.metadata?.imageryQuality || "MEDIUM",
-          visualizations: result.visualization,
-          metadata: result.metadata,
+          dataUrls: {
+            buildingFocus:
+              result.visualization.buildingFocus || result.visualization,
+            fullImage: result.visualization.fullImage || result.visualization,
+          },
+          visualizations:
+            result.visualization.buildingFocus || result.visualization, // For backward compatibility
           layerType,
+          metadata: result.metadata,
         });
       }
     } catch (error) {
