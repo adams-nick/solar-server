@@ -22,6 +22,7 @@ const MonthlyFluxProcessor = require("./layers/monthly-flux/monthly-flux-process
 const AnnualFluxProcessor = require("./layers/annual-flux/annual-flux-processor");
 const RgbProcessor = require("./layers/rgb/rgb-processor"); // Add RGB processor
 const HourlyShadeProcessor = require("./layers/hourly-shade/hourly-shade-processor");
+const RoofSegmentProcessor = require("./layers/roof-segments/roof-segments-processor");
 
 // Import visualizers
 const MaskVisualizer = require("./layers/mask/mask-visualizer");
@@ -29,6 +30,7 @@ const MonthlyFluxVisualizer = require("./layers/monthly-flux/monthly-flux-visual
 const AnnualFluxVisualizer = require("./layers/annual-flux/annual-flux-visualizer");
 const RgbVisualizer = require("./layers/rgb/rgb-visualizer"); // Add RGB visualizer
 const HourlyShadeVisualizer = require("./layers/hourly-shade/hourly-shade-visualizer");
+const RoofSegmentVisualizer = require("./layers/roof-segments/roof-segments-visualizer");
 
 // Import utilities
 const ColorPalettes = require("./utils/color-palettes");
@@ -82,6 +84,7 @@ function createLayerManager(apiClient, options = {}) {
   factory.registerProcessor(new AnnualFluxProcessor());
   factory.registerProcessor(new RgbProcessor()); // Register RGB processor
   factory.registerProcessor(new HourlyShadeProcessor());
+  factory.registerProcessor(new RoofSegmentProcessor());
 
   // Register visualizers
   factory.registerVisualizer(new MaskVisualizer());
@@ -89,6 +92,7 @@ function createLayerManager(apiClient, options = {}) {
   factory.registerVisualizer(new AnnualFluxVisualizer());
   factory.registerVisualizer(new RgbVisualizer()); // Register RGB visualizer
   factory.registerVisualizer(new HourlyShadeVisualizer());
+  factory.registerVisualizer(new RoofSegmentVisualizer());
 
   // Create layer manager
   return new LayerManager(factory, apiClient);
