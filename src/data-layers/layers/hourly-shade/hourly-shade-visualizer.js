@@ -1,8 +1,5 @@
 /**
  * Hourly shade layer visualizer for SolarScanner data-layers module
- *
- * Creates visualizations from processed hourly shade data, showing shadow patterns
- * for each hour of the day.
  */
 
 const Visualizer = require("../../core/visualizer");
@@ -25,7 +22,7 @@ class HourlyShadeVisualizer extends Visualizer {
   /**
    * Check if this visualizer can handle the given layer type
    * @param {string} layerType - The layer type to check
-   * @returns {boolean} - True if this visualizer can handle the layer type
+   * @returns {boolean} - True if this processor can handle the layer type
    */
   canHandle(layerType) {
     return layerType === "hourlyShade";
@@ -35,28 +32,23 @@ class HourlyShadeVisualizer extends Visualizer {
    * Create visualizations from processed hourly shade data
    * @param {Object} processedData - The processed hourly shade data
    * @param {Object} options - Visualization options
-   * @param {boolean} [options.buildingFocus=true] - Whether to focus on building boundaries
-   * @param {number} [options.maxDimension=400] - Maximum dimension for the output image
-   * @param {Array<Object>} [options.palette] - Custom color palette to use
-   * @param {string} [options.paletteName='SUNLIGHT'] - Name of predefined palette to use
-   * @param {number} [options.hour] - Specific hour to visualize (0-23), null for all hours
-   * @returns {Promise<Array<string>|string>} - Array of data URLs for all hours or single URL
-   * @throws {Error} if visualization fails
+   * @returns {Promise<Object>} - Object with buildingFocus and fullImage visualization URLs
    */
   async visualize(processedData, options = {}) {
     try {
       return await this.timeOperation("visualize", async () => {
-        console.log(
-          "[HourlyShadeVisualizer] Creating visualization(s) from hourly shade data"
-        );
-
         // Validate processed data
+        if (!processedData) {
+          throw new Error("No processed data provided for visualization");
+        }
+
         this.validateProcessedData(processedData, ["metadata", "hourlyData"]);
 
         // Get data from processed result
         const { metadata, hourlyData, buildingBoundaries, maskRaster } =
           processedData;
         const { width, height } = metadata.dimensions || metadata;
+        const maskDimensions = metadata.maskDimensions;
 
         // Set visualization options
         const maxDimension =
@@ -75,7 +67,7 @@ class HourlyShadeVisualizer extends Visualizer {
           palette = ColorPalettes.getPalette(paletteName);
         }
 
-        // Prepare result arrays - one for building focus, one for full image
+        // Prepare result arrays
         const buildingFocusVisualizations = [];
         const fullImageVisualizations = [];
 
@@ -87,15 +79,10 @@ class HourlyShadeVisualizer extends Visualizer {
         // Process each hour
         for (const hourData of hoursToProcess) {
           try {
-            console.log(
-              `[HourlyShadeVisualizer] Processing visualization for ${hourData.hourLabel}`
-            );
-
             // Get the raster data for this hour
             const shadeRaster = hourData.raster;
 
             // First create full image visualization
-            // ---------------
             const fullImageDataUrl = await this.createHourVisualization(
               shadeRaster,
               width,
@@ -104,20 +91,20 @@ class HourlyShadeVisualizer extends Visualizer {
               null, // No building boundaries for full image
               palette,
               maxDimension,
-              false // Not building focused
+              false, // Not building focused
+              maskDimensions
             );
 
             fullImageVisualizations.push({
               hour: hourData.hour,
               hourLabel: hourData.hourLabel,
               dataUrl: fullImageDataUrl,
-              synthetic: false,
             });
 
-            // Then create building-focused visualization if building boundaries exist
-            // ---------------
+            // Then create building-focused visualization
+            let buildingFocusDataUrl;
             if (buildingBoundaries?.hasBuilding) {
-              const buildingFocusDataUrl = await this.createHourVisualization(
+              buildingFocusDataUrl = await this.createHourVisualization(
                 shadeRaster,
                 width,
                 height,
@@ -125,39 +112,26 @@ class HourlyShadeVisualizer extends Visualizer {
                 buildingBoundaries,
                 palette,
                 maxDimension,
-                true // Building focused
+                true, // Building focused
+                maskDimensions
               );
-
-              buildingFocusVisualizations.push({
-                hour: hourData.hour,
-                hourLabel: hourData.hourLabel,
-                dataUrl: buildingFocusDataUrl,
-                synthetic: false,
-              });
             } else {
-              // If no building boundaries, use the full image for building focus as well
-              buildingFocusVisualizations.push({
-                hour: hourData.hour,
-                hourLabel: hourData.hourLabel,
-                dataUrl: fullImageDataUrl,
-                synthetic: false,
-              });
+              // If no building boundaries, use the full image
+              buildingFocusDataUrl = fullImageDataUrl;
             }
 
-            console.log(
-              `[HourlyShadeVisualizer] Completed visualizations for ${hourData.hourLabel}`
-            );
+            buildingFocusVisualizations.push({
+              hour: hourData.hour,
+              hourLabel: hourData.hourLabel,
+              dataUrl: buildingFocusDataUrl,
+            });
           } catch (error) {
             console.error(
-              `[HourlyShadeVisualizer] Error creating visualization for hour ${hourData.hour}: ${error.message}`
+              `[HourlyShadeVisualizer] Error processing hour ${hourData.hour}: ${error.message}`
             );
             throw error;
           }
         }
-
-        console.log(
-          `[HourlyShadeVisualizer] Created ${hoursToProcess.length} visualizations in both formats`
-        );
 
         // Return result based on request type
         if (specificHour) {
@@ -173,15 +147,30 @@ class HourlyShadeVisualizer extends Visualizer {
         }
       });
     } catch (error) {
-      // Log the error and re-throw it
-      console.error(`[HourlyShadeVisualizer] Error: ${error.message}`);
-      throw new Error(
+      // Create a well-formatted error
+      const enhancedError = new Error(
         `Failed to visualize hourly shade data: ${error.message}`
       );
+      enhancedError.originalError = error;
+      enhancedError.layerType = "hourlyShade";
+      throw enhancedError;
     }
   }
 
-  // Helper method to create visualization for a single hour
+  /**
+   * Create a visualization for a single hour
+   * @private
+   * @param {Array<number>} shadeRaster - Shade raster data
+   * @param {number} width - Image width
+   * @param {number} height - Image height
+   * @param {Array<number>} maskRaster - Mask raster data (optional)
+   * @param {Object} buildingBoundaries - Building boundaries object (optional)
+   * @param {Array<Object>} palette - Color palette
+   * @param {number} maxDimension - Maximum dimension for output image
+   * @param {boolean} buildingFocus - Whether to focus on building boundaries
+   * @param {Object} maskDimensions - Dimensions of the mask (optional)
+   * @returns {Promise<string>} - Data URL of the visualization
+   */
   async createHourVisualization(
     shadeRaster,
     width,
@@ -190,56 +179,74 @@ class HourlyShadeVisualizer extends Visualizer {
     buildingBoundaries,
     palette,
     maxDimension,
-    buildingFocus
+    buildingFocus,
+    maskDimensions
   ) {
+    // Determine dimensions for output - for building focus, use mask dimensions
+    let targetWidth = width;
+    let targetHeight = height;
+
+    // For building focus with mask, use the mask dimensions for upscaling
+    if (buildingFocus && maskRaster && maskDimensions) {
+      targetWidth = maskDimensions.width;
+      targetHeight = maskDimensions.height;
+    }
+
+    // Scale up the hourly shade data to match target dimensions if needed
+    let processedShadeRaster = shadeRaster;
+    if (buildingFocus && (width !== targetWidth || height !== targetHeight)) {
+      processedShadeRaster = this.scaleUpRaster(
+        shadeRaster,
+        width,
+        height,
+        targetWidth,
+        targetHeight
+      );
+    }
+
     // Determine dimensions and cropping
     let outputWidth, outputHeight, startX, startY;
     let croppedData;
 
+    // If building focus with boundaries, crop to building area
     if (buildingFocus && buildingBoundaries?.hasBuilding) {
-      // Use building boundaries for cropping
-      console.log(
-        "[HourlyShadeVisualizer] Using building focus for visualization"
-      );
-
       const { minX, minY, width: bWidth, height: bHeight } = buildingBoundaries;
       startX = minX;
       startY = minY;
       outputWidth = bWidth;
       outputHeight = bHeight;
 
-      // Create cropped data array
+      // Create cropped data array from the upscaled raster
       croppedData = new Array(outputWidth * outputHeight);
       for (let y = 0; y < outputHeight; y++) {
         for (let x = 0; x < outputWidth; x++) {
-          const srcIdx = (startY + y) * width + (startX + x);
+          const srcIdx = (startY + y) * targetWidth + (startX + x);
           const destIdx = y * outputWidth + x;
-          croppedData[destIdx] = shadeRaster[srcIdx];
+          croppedData[destIdx] = processedShadeRaster[srcIdx];
         }
       }
     } else {
       // Use full image
-      console.log("[HourlyShadeVisualizer] Using full image for visualization");
       startX = 0;
       startY = 0;
-      outputWidth = width;
-      outputHeight = height;
-      croppedData = shadeRaster;
+      outputWidth = buildingFocus ? targetWidth : width;
+      outputHeight = buildingFocus ? targetHeight : height;
+      croppedData = buildingFocus ? processedShadeRaster : shadeRaster;
     }
 
     // Apply max dimension limit if needed
+    let scaledWidth = outputWidth;
+    let scaledHeight = outputHeight;
+
     if (outputWidth > maxDimension || outputHeight > maxDimension) {
       const aspectRatio = outputWidth / outputHeight;
       if (outputWidth > outputHeight) {
-        outputWidth = maxDimension;
-        outputHeight = Math.round(maxDimension / aspectRatio);
+        scaledWidth = maxDimension;
+        scaledHeight = Math.round(maxDimension / aspectRatio);
       } else {
-        outputHeight = maxDimension;
-        outputWidth = Math.round(maxDimension * aspectRatio);
+        scaledHeight = maxDimension;
+        scaledWidth = Math.round(maxDimension * aspectRatio);
       }
-      console.log(
-        `[HourlyShadeVisualizer] Resized to ${outputWidth}x${outputHeight} to fit max dimension`
-      );
     }
 
     // Create a mask array for cropping if needed
@@ -248,7 +255,7 @@ class HourlyShadeVisualizer extends Visualizer {
       croppedMaskRaster = new Array(outputWidth * outputHeight);
       for (let y = 0; y < outputHeight; y++) {
         for (let x = 0; x < outputWidth; x++) {
-          const srcIdx = (startY + y) * width + (startX + x);
+          const srcIdx = (startY + y) * targetWidth + (startX + x);
           const destIdx = y * outputWidth + x;
           croppedMaskRaster[destIdx] = maskRaster[srcIdx];
         }
@@ -256,24 +263,38 @@ class HourlyShadeVisualizer extends Visualizer {
     }
 
     // Create canvas and context
-    const { canvas, ctx } = this.createEmptyCanvas(outputWidth, outputHeight);
+    const { canvas, ctx } = this.createEmptyCanvas(scaledWidth, scaledHeight);
 
     // Create image data
-    const imageData = ctx.createImageData(outputWidth, outputHeight);
+    const imageData = ctx.createImageData(scaledWidth, scaledHeight);
+
+    // Count transparent and opaque pixels for debugging
+    let transparentPixels = 0;
+    let opaquePixels = 0;
 
     // Fill the image data
-    for (let y = 0; y < outputHeight; y++) {
-      for (let x = 0; x < outputWidth; x++) {
-        const idx = y * outputWidth + x;
-        const destIdx = (y * outputWidth + x) * 4;
+    for (let y = 0; y < scaledHeight; y++) {
+      for (let x = 0; x < scaledWidth; x++) {
+        // Calculate source coordinates (with scaling)
+        const srcX = Math.min(
+          Math.floor(x * (outputWidth / scaledWidth)),
+          outputWidth - 1
+        );
+        const srcY = Math.min(
+          Math.floor(y * (outputHeight / scaledHeight)),
+          outputHeight - 1
+        );
+        const srcIdx = srcY * outputWidth + srcX;
+
+        const destIdx = (y * scaledWidth + x) * 4;
 
         // Get shade value (0 = shade, 1 = sun)
-        const shadeValue = croppedData[idx];
+        const shadeValue = croppedData[srcIdx];
 
         // Apply mask if available
-        const useMask =
-          maskRaster && buildingFocus && buildingBoundaries?.hasBuilding;
-        const isMasked = useMask && croppedMaskRaster[idx] > 0;
+        const useMask = buildingFocus && croppedMaskRaster;
+        const maskValue = useMask ? croppedMaskRaster[srcIdx] : 0;
+        const isMasked = useMask && maskValue > 0;
 
         // Set color based on shade value
         const colorIndex = shadeValue ? palette.length - 1 : 0;
@@ -285,9 +306,16 @@ class HourlyShadeVisualizer extends Visualizer {
 
         // Set alpha (transparency)
         if (useMask) {
-          imageData.data[destIdx + 3] = isMasked ? 255 : 0; // Transparent if not masked
+          // Set transparency based on mask
+          imageData.data[destIdx + 3] = isMasked ? 255 : 0; // Transparent if not in mask
+          if (isMasked) {
+            opaquePixels++;
+          } else {
+            transparentPixels++;
+          }
         } else {
           imageData.data[destIdx + 3] = 255; // Fully opaque
+          opaquePixels++;
         }
       }
     }
@@ -296,10 +324,58 @@ class HourlyShadeVisualizer extends Visualizer {
     ctx.putImageData(imageData, 0, 0);
 
     // Convert canvas to data URL
-    return this.canvasToDataURL(canvas, {
+    const dataUrl = this.canvasToDataURL(canvas, {
       mimeType: "image/png",
       quality: config.visualization.PNG_QUALITY,
     });
+
+    return dataUrl;
+  }
+
+  /**
+   * Scale up a raster to higher dimensions
+   * @private
+   * @param {Array<number>} raster - Original raster data
+   * @param {number} sourceWidth - Original width
+   * @param {number} sourceHeight - Original height
+   * @param {number} targetWidth - Target width
+   * @param {number} targetHeight - Target height
+   * @returns {Array<number>} - Scaled raster
+   */
+  scaleUpRaster(raster, sourceWidth, sourceHeight, targetWidth, targetHeight) {
+    const scaledRaster = new Array(targetWidth * targetHeight);
+
+    // Calculate scaling factors
+    const scaleX = sourceWidth / targetWidth;
+    const scaleY = sourceHeight / targetHeight;
+
+    for (let y = 0; y < targetHeight; y++) {
+      for (let x = 0; x < targetWidth; x++) {
+        // Find corresponding position in source raster (nearest neighbor)
+        const srcX = Math.min(Math.floor(x * scaleX), sourceWidth - 1);
+        const srcY = Math.min(Math.floor(y * scaleY), sourceHeight - 1);
+        const srcIdx = srcY * sourceWidth + srcX;
+
+        // Set the value in the scaled raster
+        const destIdx = y * targetWidth + x;
+        scaledRaster[destIdx] = raster[srcIdx];
+      }
+    }
+
+    return scaledRaster;
+  }
+
+  /**
+   * Format hour for display (12-hour format with am/pm)
+   * @private
+   * @param {number} hour - Hour in 24-hour format (0-23)
+   * @returns {string} - Formatted hour string
+   */
+  formatHour(hour) {
+    if (hour === 0) return "12am";
+    if (hour === 12) return "12pm";
+    if (hour < 12) return `${hour}am`;
+    return `${hour - 12}pm`;
   }
 }
 
