@@ -3,6 +3,10 @@ const cors = require("cors");
 const helmet = require("helmet");
 const app = express();
 
+//We need to increase the size can be included in requests/responses to support recieving aerial image from client, and recieving polygons from ML
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
+
 // Middleware
 app.use(helmet());
 app.use(
@@ -38,7 +42,9 @@ app.use("/api/v1/solar", solarRoutes);
 // solar APi route for solar flux layer, WIP
 const dataLayersRoutes = require("./api/routes/dataLayersRoutes");
 app.use("/api/v1/data-layers", dataLayersRoutes);
-
+//For ML SERVER:
+const roofSegmentRoutes = require("./api/routes/roofSegmentRoutes");
+app.use("/api/v1/roof", roofSegmentRoutes);
 // Error handler
 app.use((err, req, res, next) => {
   console.error(err.stack);
