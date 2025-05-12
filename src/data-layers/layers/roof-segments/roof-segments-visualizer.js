@@ -228,38 +228,32 @@ class RoofSegmentVisualizer extends Visualizer {
    */
   drawGroupedSegment(ctx, segment, bounds, canvasSize) {
     try {
-      // If we have a composite shape, draw it directly
-      if (segment.isCompositeShape && segment.componentSegments) {
-        // Draw each component segment
-        segment.componentSegments.forEach((componentSegment) => {
-          if (
-            componentSegment.corners &&
-            componentSegment.corners.length >= 3
-          ) {
-            // Convert corners to pixel coordinates
-            const pixelCoords = componentSegment.corners.map((corner) =>
-              this.geoToPixelCoords(corner, bounds, canvasSize)
-            );
+      // Instead of drawing all component segments, draw a single bounding box
+      // that encompasses all components of the group
 
-            // Draw this component
-            this.drawPolygon(
-              ctx,
-              pixelCoords,
-              segment.isHorizontal,
-              segment.azimuth,
-              0.6
-            );
-          }
-        });
-      }
-      // Fallback to drawing the corners if composite shape not available
-      else if (segment.corners && segment.corners.length >= 3) {
+      // First, determine the overall bounds of the group
+      if (segment.boundingBox) {
+        // If segment already has an overall boundingBox property, use it directly
+        const sw = segment.boundingBox.sw;
+        const ne = segment.boundingBox.ne;
+
         // Convert corners to pixel coordinates
-        const pixelCoords = segment.corners.map((corner) =>
-          this.geoToPixelCoords(corner, bounds, canvasSize)
-        );
+        const pixelCoords = [
+          this.geoToPixelCoords(sw, bounds, canvasSize), // Southwest
+          this.geoToPixelCoords(
+            { latitude: sw.latitude, longitude: ne.longitude },
+            bounds,
+            canvasSize
+          ), // Southeast
+          this.geoToPixelCoords(ne, bounds, canvasSize), // Northeast
+          this.geoToPixelCoords(
+            { latitude: ne.latitude, longitude: sw.longitude },
+            bounds,
+            canvasSize
+          ), // Northwest
+        ];
 
-        // Draw the polygon with slightly higher opacity for grouped segments
+        // Draw the simplified rectangle with slightly higher opacity for grouped segments
         this.drawPolygon(
           ctx,
           pixelCoords,
@@ -269,7 +263,7 @@ class RoofSegmentVisualizer extends Visualizer {
         );
       } else {
         console.warn(
-          `[RoofSegmentVisualizer] Grouped segment ${segment.id} doesn't have enough corner points`
+          `[RoofSegmentVisualizer] Grouped segment ${segment.id} doesn't have a boundingBox`
         );
       }
     } catch (error) {

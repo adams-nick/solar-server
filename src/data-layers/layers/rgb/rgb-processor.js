@@ -41,7 +41,7 @@ class RgbProcessor extends Processor {
    * @param {Object} [rawData.metadata] - Additional metadata from the fetcher
    * @param {Object} options - Processing options
    * @param {boolean} [options.useMask=true] - Whether to use mask data if available
-   * @param {number} [options.buildingMargin=20] - Margin to add around building boundaries
+   * @param {number} [options.buildingMargin=0] - Margin to add around building boundaries
    * @returns {Promise<Object>} - Processed RGB data
    * @throws {Error} if processing fails
    */
@@ -96,8 +96,7 @@ class RgbProcessor extends Processor {
 
         // Set default options
         const useMask = options.useMask !== false && maskBuffer;
-        const buildingMargin =
-          options.buildingMargin || config.visualization.BUILDING_MARGIN;
+        const buildingMargin = 0;
 
         // Process the RGB GeoTIFF data
         let processedRgbGeoTiff;

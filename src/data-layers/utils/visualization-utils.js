@@ -11,13 +11,13 @@ class VisualizationUtils {
    * @param {number} width - Image width
    * @param {number} height - Image height
    * @param {Object} options - Options
-   * @param {number} [options.margin=20] - Margin to add around boundaries
+   * @param {number} [options.margin=0] - Margin to add around boundaries
    * @param {number} [options.threshold=0] - Threshold value for mask (pixels > threshold are buildings)
    * @returns {Object} - Building boundary information
    */
   static findBuildingBoundaries(maskData, width, height, options = {}) {
     try {
-      const margin = options.margin ?? 20;
+      const margin = options.margin ?? 0;
       const threshold = options.threshold ?? 0;
 
       // Find min/max coordinates where mask value > threshold
