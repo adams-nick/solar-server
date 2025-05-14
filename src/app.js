@@ -42,6 +42,11 @@ app.use("/api/v1/data-layers", dataLayersRoutes);
 //For ML SERVER:
 const roofSegmentRoutes = require("./api/routes/roofSegmentRoutes");
 app.use("/api/v1/roof", roofSegmentRoutes);
+
+//For Comprehensive:
+const comprehensiveRoute = require("./api/routes/comprehensiveRoute");
+app.use("/api/v1/solar", comprehensiveRoute);
+
 // Error handler
 app.use((err, req, res, next) => {
   console.error(err.stack);
