@@ -1,5 +1,4 @@
-// src/api/routes/solarRoutes.js - Updated with segment filtering
-
+// src/api/routes/solarRoutes.js
 const express = require("express");
 const router = express.Router();
 const axios = require("axios");
@@ -37,8 +36,9 @@ router.post("/buildingInsights", async (req, res) => {
       `Processing solar request for ${buildingType} at ${center.latitude}, ${center.longitude}`
     );
 
-    // Call Google Solar API
-    const response = await axios({
+    // Step 1: Call Google Solar API for buildingInsights
+    console.log("Fetching building insights data...");
+    const buildingResponse = await axios({
       method: "GET",
       url: "https://solar.googleapis.com/v1/buildingInsights:findClosest",
       params: {
@@ -50,131 +50,50 @@ router.post("/buildingInsights", async (req, res) => {
       timeout: 30000,
     });
 
-    console.log("Solar API response received");
+    console.log("Building Insights API response received");
 
-    // Process the buildingInsights data to create roof segment visualization
+    // Step 2: Get data layer information
+    console.log("Fetching data layers...");
+
+    const dataLayersResponse = await axios({
+      method: "GET",
+      url: "https://solar.googleapis.com/v1/dataLayers:get",
+      params: {
+        "location.latitude": center.latitude,
+        "location.longitude": center.longitude,
+        radius_meters: 50, // You can adjust this based on building size
+        required_quality: "LOW", // Request at least LOW quality (will get best available)
+        key: process.env.GOOGLE_MAPS_API_KEY,
+      },
+      timeout: 30000,
+    });
+
+    console.log("Data Layers API response received");
+
+    // Step 3: Process roof segments (can be easily removed in the future)
+    let roofSegmentsData = null;
     try {
-      // Create processor and visualizer instances directly
-      const roofSegmentProcessor = new RoofSegmentProcessor();
-      const roofSegmentVisualizer = new RoofSegmentVisualizer();
-
-      // Process the roof segment data
-      const processedData = await roofSegmentProcessor.process(response.data);
-
-      // Filter out segments that are too small to hold at least one panel
-      const solarPotential = response.data.solarPotential;
-      const panelWidth = solarPotential.panelWidthMeters || 1.045;
-      const panelHeight = solarPotential.panelHeightMeters || 1.879;
-      const minPanelArea = panelWidth * panelHeight;
-
-      // Add some margin for installation constraints
-      const installationFactor = 1.1; // 10% extra space needed for mounting
-      const minSegmentArea = minPanelArea * installationFactor;
-
-      // Filter the segments
-      const viableSegments = processedData.roofSegments.filter((segment) => {
-        // Check if segment is large enough for a panel
-        const isLargeEnough = segment.area >= minSegmentArea;
-
-        // Optionally, also check suitability
-        const hasReasonableSuitability = segment.suitability > 0.2; // Minimum 20% suitability
-
-        return isLargeEnough && hasReasonableSuitability;
-      });
-
-      console.log(
-        `Filtered from ${processedData.roofSegments.length} to ${viableSegments.length} viable roof segments`
-      );
-
-      // Skip processing if no viable segments
-      if (viableSegments.length === 0) {
-        return res.json({
-          source: "google-solar-api",
-          buildingType,
-          buildingId,
-          data: response.data,
-          roofSegments: {
-            error: "No viable roof segments found",
-            available: false,
-          },
-        });
-      }
-
-      // Create a new processed data object with filtered segments
-      const filteredData = {
-        ...processedData,
-        roofSegments: viableSegments,
-        metadata: {
-          ...processedData.metadata,
-          viableSegmentCount: viableSegments.length,
-          originalSegmentCount: processedData.roofSegments.length,
-        },
+      roofSegmentsData = await processRoofSegments(buildingResponse.data);
+      console.log("Roof segments processed successfully");
+    } catch (segmentError) {
+      console.error("Error processing roof segments:", segmentError);
+      roofSegmentsData = {
+        error: segmentError.message,
+        available: false,
       };
-
-      // Create visualizations with different color modes
-      const suitabilityVisualization = await roofSegmentVisualizer.visualize(
-        filteredData,
-        {
-          colorMode: "suitability",
-          showLabels: true,
-          showLegend: true,
-        }
-      );
-
-      const orientationVisualization = await roofSegmentVisualizer.visualize(
-        filteredData,
-        {
-          colorMode: "orientation",
-          showLegend: true,
-        }
-      );
-
-      // Calculate total viable area
-      const totalViableArea = viableSegments.reduce(
-        (sum, segment) => sum + segment.area,
-        0
-      );
-
-      // Add the visualizations to the response
-      const enhancedResponse = {
-        source: "google-solar-api",
-        buildingType,
-        buildingId,
-        data: response.data,
-        // Add roof segment data and visualizations
-        roofSegments: {
-          data: viableSegments,
-          visualizations: {
-            suitability: suitabilityVisualization,
-            orientation: orientationVisualization,
-          },
-          bounds: processedData.bounds,
-          metadata: {
-            totalViableArea: totalViableArea.toFixed(2),
-            segmentCount: viableSegments.length,
-            minPanelArea: minPanelArea.toFixed(2),
-            originalSegmentCount: processedData.roofSegments.length,
-          },
-        },
-      };
-
-      return res.json(enhancedResponse);
-    } catch (processingError) {
-      console.error("Error processing roof segments:", processingError);
-
-      // If roof segment processing fails, still return the original data
-      return res.json({
-        source: "google-solar-api",
-        buildingType,
-        buildingId,
-        data: response.data,
-        // Indicate that roof segment processing failed
-        roofSegments: {
-          error: processingError.message,
-          available: false,
-        },
-      });
     }
+
+    // Step 4: Return combined data to client
+    const enhancedResponse = {
+      source: "google-solar-api",
+      buildingType,
+      buildingId,
+      buildingInsights: buildingResponse.data,
+      dataLayers: dataLayersResponse.data, // Include the entire data layers response
+      roofSegments: roofSegmentsData, // Separate property for roof segments
+    };
+
+    return res.json(enhancedResponse);
   } catch (error) {
     console.error("Error fetching solar data:");
 
@@ -204,5 +123,108 @@ router.post("/buildingInsights", async (req, res) => {
     }
   }
 });
+
+/**
+ * Process roof segments from building insights data
+ * This function is modular and can be easily removed in the future
+ *
+ * @param {Object} buildingInsightsData - Building insights data from Google Solar API
+ * @returns {Object} Processed roof segments with visualizations
+ */
+async function processRoofSegments(buildingInsightsData) {
+  // Create processor and visualizer instances directly
+  const roofSegmentProcessor = new RoofSegmentProcessor();
+  const roofSegmentVisualizer = new RoofSegmentVisualizer();
+
+  // Process the roof segment data
+  const processedData = await roofSegmentProcessor.process(
+    buildingInsightsData
+  );
+
+  // Filter out segments that are too small to hold at least one panel
+  const solarPotential = buildingInsightsData.solarPotential;
+  const panelWidth = solarPotential.panelWidthMeters || 1.045;
+  const panelHeight = solarPotential.panelHeightMeters || 1.879;
+  const minPanelArea = panelWidth * panelHeight;
+
+  // Add some margin for installation constraints
+  const installationFactor = 1.1; // 10% extra space needed for mounting
+  const minSegmentArea = minPanelArea * installationFactor;
+
+  // Filter the segments
+  const viableSegments = processedData.roofSegments.filter((segment) => {
+    // Check if segment is large enough for a panel
+    const isLargeEnough = segment.area >= minSegmentArea;
+
+    // Optionally, also check suitability
+    const hasReasonableSuitability = segment.suitability > 0.2; // Minimum 20% suitability
+
+    return isLargeEnough && hasReasonableSuitability;
+  });
+
+  console.log(
+    `Filtered from ${processedData.roofSegments.length} to ${viableSegments.length} viable roof segments`
+  );
+
+  // Skip processing if no viable segments
+  if (viableSegments.length === 0) {
+    return {
+      error: "No viable roof segments found",
+      available: false,
+    };
+  }
+
+  // Create a new processed data object with filtered segments
+  const filteredData = {
+    ...processedData,
+    roofSegments: viableSegments,
+    metadata: {
+      ...processedData.metadata,
+      viableSegmentCount: viableSegments.length,
+      originalSegmentCount: processedData.roofSegments.length,
+    },
+  };
+
+  // Create visualizations with different color modes
+  const suitabilityVisualization = await roofSegmentVisualizer.visualize(
+    filteredData,
+    {
+      colorMode: "suitability",
+      showLabels: true,
+      showLegend: true,
+    }
+  );
+
+  const orientationVisualization = await roofSegmentVisualizer.visualize(
+    filteredData,
+    {
+      colorMode: "orientation",
+      showLegend: true,
+    }
+  );
+
+  // Calculate total viable area
+  const totalViableArea = viableSegments.reduce(
+    (sum, segment) => sum + segment.area,
+    0
+  );
+
+  // Return the processed data
+  return {
+    data: viableSegments,
+    visualizations: {
+      suitability: suitabilityVisualization,
+      orientation: orientationVisualization,
+    },
+    bounds: processedData.bounds,
+    metadata: {
+      totalViableArea: totalViableArea.toFixed(2),
+      segmentCount: viableSegments.length,
+      minPanelArea: minPanelArea.toFixed(2),
+      originalSegmentCount: processedData.roofSegments.length,
+    },
+    available: true,
+  };
+}
 
 module.exports = router;

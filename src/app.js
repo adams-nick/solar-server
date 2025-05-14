@@ -25,9 +25,6 @@ app.get("/", (req, res) => {
 // Include routes
 const internalRoutes = require("./api/routes/internalRoutes");
 app.use("/api/v1/internal", internalRoutes);
-// Include scan routes - customer-facing
-const scanRoutes = require("./api/routes/customerRoutes");
-app.use("/api/v1/customer", scanRoutes);
 
 //NEW
 // places routes for automcomplete address
