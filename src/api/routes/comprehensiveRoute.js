@@ -185,8 +185,10 @@ async function processComprehensiveAnalysis(res, session) {
   let processingResults = {
     buildingInsights: null,
     rgbResult: null,
+    dsmResult: null,
     roofSegmentsResult: null,
     mlServerResult: null,
+    dataLayersResponse: null,
   };
 
   try {
@@ -229,12 +231,11 @@ async function processComprehensiveAnalysis(res, session) {
       message: "Fetching data layers...",
     });
 
-    let dataLayersResponse;
     try {
-      dataLayersResponse = await fetchDataLayers(location);
+      processingResults.dataLayersResponse = await fetchDataLayers(location);
 
       // Process RGB image if available
-      if (dataLayersResponse.rgbUrl) {
+      if (processingResults.dataLayersResponse.rgbUrl) {
         sendSSEEvent(res, "progress", {
           progress: 35,
           message: "Processing RGB imagery...",
@@ -244,7 +245,7 @@ async function processComprehensiveAnalysis(res, session) {
           // Process the RGB layer with proper visualization
           processingResults.rgbResult = await processRgbLayer(
             location,
-            dataLayersResponse
+            processingResults.dataLayersResponse
           );
 
           // Send RGB visualization to client
@@ -254,8 +255,9 @@ async function processComprehensiveAnalysis(res, session) {
             // Include the processed dataUrls with both views
             dataUrls: processingResults.rgbResult.dataUrls,
             metadata: {
-              imageryDate: dataLayersResponse.imageryDate,
-              imageryQuality: dataLayersResponse.imageryQuality,
+              imageryDate: processingResults.dataLayersResponse.imageryDate,
+              imageryQuality:
+                processingResults.dataLayersResponse.imageryQuality,
               dimensions: processingResults.rgbResult.metadata?.dimensions,
               hasMask: processingResults.rgbResult.metadata?.hasMask,
               buildingBoundaries:
@@ -350,7 +352,8 @@ async function processComprehensiveAnalysis(res, session) {
           await processMlServerRoofSegmentation(
             processingResults.rgbResult,
             processingResults.buildingInsights,
-            processingResults.roofSegmentsResult?.data
+            processingResults.roofSegmentsResult?.data,
+            processingResults.dataLayersResponse
           );
 
         // Send ML server results to client
@@ -617,6 +620,124 @@ async function processRgbLayer(location, dataLayersResponse) {
 }
 
 /**
+ * Process DSM layer using the layer manager
+ * @param {Object} location - Location object with latitude and longitude
+ * @param {Object} dataLayersResponse - Response from the data layers API
+ * @returns {Promise<Object>} Processed DSM layer data
+ */
+async function processDsmLayer(location, dataLayersResponse) {
+  try {
+    console.log(
+      `Processing DSM layer for location: ${location.latitude}, ${location.longitude}`
+    );
+
+    if (!dataLayersResponse.dsmUrl) {
+      throw new Error("DSM URL not available in data layers response");
+    }
+
+    // Create a proper radius that matches the area in the data layers
+    const radius = 50; // Default radius, adjust as needed
+
+    // Use the layer manager to process the DSM layer
+    const result = await layerManager.processLayer("dsm", location, {
+      radius,
+      layerUrl: dataLayersResponse.dsmUrl,
+      maskUrl: dataLayersResponse.maskUrl,
+      buildingFocus: true,
+      fallbackToSynthetic: false,
+    });
+
+    // Check if we got a valid result
+    if (!result) {
+      throw new Error("DSM processing did not return expected data");
+    }
+
+    // Add more robust dimension detection
+    let width = 0;
+    let height = 0;
+
+    // Log the full result structure to diagnose the issue
+    console.log(
+      "DSM processing result structure:",
+      JSON.stringify(
+        {
+          hasProcessedData: !!result.processedData,
+          metadataKeys: result.metadata ? Object.keys(result.metadata) : [],
+          rasterAvailable: !!result.processedData?.raster,
+          rasterLength: result.processedData?.raster?.length,
+          dimensionsFromMetadata: result.metadata?.dimensions,
+        },
+        null,
+        2
+      )
+    );
+
+    // Try different sources for dimensions
+    if (
+      result.metadata?.dimensions?.width > 0 &&
+      result.metadata?.dimensions?.height > 0
+    ) {
+      // If dimensions are available in the expected location
+      width = result.metadata.dimensions.width;
+      height = result.metadata.dimensions.height;
+      console.log(`Using dimensions from metadata: ${width}x${height}`);
+    } else if (
+      result.processedData?.width > 0 &&
+      result.processedData?.height > 0
+    ) {
+      // Some processors put dimensions directly on the processedData
+      width = result.processedData.width;
+      height = result.processedData.height;
+      console.log(`Using dimensions from processedData: ${width}x${height}`);
+    } else if (result.processedData?.raster) {
+      // If we have raster data, try to infer dimensions
+      const rasterData = result.processedData.raster;
+
+      if (Array.isArray(rasterData) && rasterData.length > 0) {
+        // For GeoTIFF data, the raster is often organized as a flat array
+        // We need to know the width to reconstruct the 2D structure
+
+        // Check if shape information is available in other fields
+        if (result.width && result.height) {
+          width = result.width;
+          height = result.height;
+        } else if (result.bounds?.pixelWidth && result.bounds?.pixelHeight) {
+          width = result.bounds.pixelWidth;
+          height = result.bounds.pixelHeight;
+        } else {
+          // As a last resort, try to infer a square dimension from array length
+          // This is just a fallback and might not be accurate
+          const totalPixels = rasterData.length;
+          const size = Math.sqrt(totalPixels);
+          width = Math.round(size);
+          height = Math.round(size);
+          console.log(
+            `Inferred dimensions from raster length: ${width}x${height}`
+          );
+        }
+      }
+    }
+
+    // Return the processed DSM data with robust dimension handling
+    return {
+      layerType: "dsm",
+      bounds: result.bounds,
+      buildingBoundaries: result.buildingBoundaries,
+      // Include the raw height data if available
+      elevationData: result.processedData?.raster || null,
+      metadata: {
+        dimensions: { width, height },
+        hasMask: !!dataLayersResponse.maskUrl,
+        dataRange: result.metadata?.dataRange || { min: 0, max: 100 },
+      },
+    };
+  } catch (error) {
+    console.error("Error processing DSM layer:", error);
+    throw new Error(`Failed to process DSM data: ${error.message}`);
+  }
+}
+
+/**
  * Process roof segments from building insights data
  * @param {Object} buildingInsightsData - Building insights data from Google Solar API
  * @returns {Promise<Object>} Processed roof segments with visualizations
@@ -732,12 +853,14 @@ async function processRoofSegments(buildingInsightsData) {
  * @param {Object} rgbResult - Processed RGB data
  * @param {Object} buildingInsights - Building insights data
  * @param {Array} roofSegments - Processed roof segments (optional)
+ * @param {Object} dataLayersResponse - Data layers response from Google Solar API
  * @returns {Promise<Object>} ML server processing results
  */
 async function processMlServerRoofSegmentation(
   rgbResult,
   buildingInsights,
-  roofSegments = null
+  roofSegments = null,
+  dataLayersResponse = null
 ) {
   try {
     console.log("Processing ML server roof segmentation");
@@ -752,6 +875,7 @@ async function processMlServerRoofSegmentation(
     }
 
     // Extract dimensions from RGB result
+    console.log("rgb dimensions??? ", rgbResult.metadata);
     const imageWidth = rgbResult.metadata?.dimensions?.width || 400;
     const imageHeight = rgbResult.metadata?.dimensions?.height || 224;
 
@@ -770,6 +894,95 @@ async function processMlServerRoofSegmentation(
       roofSegments: pixelCoordinates.roofSegments.length,
     });
 
+    // Process DSM data if available
+    let dsmData = null;
+    // Inside processMlServerRoofSegmentation function
+    // Add validation checks when processing DSM data
+    if (dataLayersResponse && dataLayersResponse.dsmUrl) {
+      try {
+        console.log("Processing DSM data for ML server request");
+        const location = {
+          latitude: buildingInsights.center.latitude,
+          longitude: buildingInsights.center.longitude,
+        };
+
+        // Process the DSM data
+        const dsmResult = await processDsmLayer(location, dataLayersResponse);
+
+        // Log the actual dimensions before extraction
+        console.log("Original DSM dimensions:", dsmResult.metadata.dimensions);
+
+        if (dsmResult && dsmResult.elevationData) {
+          // Validate dimensions before extracting
+          if (
+            !dsmResult.metadata.dimensions.width ||
+            !dsmResult.metadata.dimensions.height
+          ) {
+            console.error(
+              "Invalid DSM dimensions detected:",
+              dsmResult.metadata.dimensions
+            );
+            throw new Error(
+              "DSM data has invalid dimensions (width or height is zero)"
+            );
+          }
+
+          // Extract only the building area from the DSM data using the building mask
+          const buildingBox = pixelCoordinates.buildingBox;
+
+          // Log building box for debugging
+          console.log("Building box for DSM extraction:", buildingBox);
+
+          // Validate building box before extraction
+          if (
+            buildingBox.min_x >= buildingBox.max_x ||
+            buildingBox.min_y >= buildingBox.max_y
+          ) {
+            console.error(
+              "Invalid building box for DSM extraction:",
+              buildingBox
+            );
+            throw new Error("Building box has invalid dimensions");
+          }
+
+          const extractedDsmData = extractBuildingDsmData(
+            dsmResult.elevationData,
+            dsmResult.metadata.dimensions.width,
+            dsmResult.metadata.dimensions.height,
+            buildingBox
+          );
+
+          // Validate the extracted data
+          if (!extractedDsmData.width || !extractedDsmData.height) {
+            console.error(
+              "Extracted DSM data has invalid dimensions:",
+              extractedDsmData
+            );
+            throw new Error("Extracted DSM data has zero width or height");
+          }
+
+          dsmData = {
+            elevationData: extractedDsmData.data,
+            dimensions: {
+              width: extractedDsmData.width,
+              height: extractedDsmData.height,
+            },
+            dataRange: dsmResult.metadata.dataRange,
+          };
+
+          console.log("DSM data processed successfully:", {
+            dimensions: dsmData.dimensions,
+            dataRange: dsmData.dataRange,
+          });
+        }
+      } catch (dsmError) {
+        console.error("Error processing DSM data:", dsmError);
+        console.log("Continuing ML request without DSM data");
+        // Continue without DSM data
+        dsmData = null;
+      }
+    }
+
     // Create request data for ML server
     const requestData = {
       building_id: buildingId,
@@ -781,14 +994,20 @@ async function processMlServerRoofSegmentation(
       building_center: pixelCoordinates.buildingCenter,
     };
 
+    // Add DSM data if available
+    if (dsmData) {
+      requestData.dsm_data = dsmData;
+    }
+
     // Log the request data (without image data)
     const logData = { ...requestData };
     if (logData.rgb_image) logData.rgb_image = "[RGB IMAGE DATA URL]";
+    if (logData.dsm_data) logData.dsm_data = "[DSM DATA]";
     console.log("ML server request data:", JSON.stringify(logData, null, 2));
 
     // Send request to ML server
     const startTime = Date.now();
-    console.log("comprehensive route ml request: ", requestData);
+    console.log("Sending request to ML server...");
     const mlResponse = await axios.post(
       `${ML_SERVER_URL}/api/predict`,
       requestData,
@@ -820,6 +1039,74 @@ async function processMlServerRoofSegmentation(
       error_details: error.response?.data || {},
     };
   }
+}
+
+/**
+ * Extract building-only DSM data using the building bounding box
+ * @param {Array|TypedArray} dsmData - Full DSM elevation data
+ * @param {number} width - Width of the full DSM data
+ * @param {number} height - Height of the full DSM data
+ * @param {Object} buildingBox - Building bounding box in pixel coordinates
+ * @returns {Object} - Extracted DSM data for the building area only
+ */
+function extractBuildingDsmData(dsmData, width, height, buildingBox) {
+  if (!dsmData || !width || !height) {
+    console.error("Invalid DSM data or dimensions:", {
+      width,
+      height,
+      dataLength: dsmData?.length,
+    });
+    throw new Error("Invalid DSM data or dimensions");
+  }
+
+  // Ensure building box is within DSM dimensions and has non-zero size
+  const minX = Math.max(0, Math.floor(buildingBox.min_x));
+  const minY = Math.max(0, Math.floor(buildingBox.min_y));
+  const maxX = Math.min(width - 1, Math.ceil(buildingBox.max_x));
+  const maxY = Math.min(height - 1, Math.ceil(buildingBox.max_y));
+
+  // Calculate dimensions of extracted area
+  const extractWidth = maxX - minX + 1;
+  const extractHeight = maxY - minY + 1;
+
+  // Validate extracted dimensions
+  if (extractWidth <= 0 || extractHeight <= 0) {
+    console.error("Invalid extraction dimensions:", {
+      extractWidth,
+      extractHeight,
+      minX,
+      maxX,
+      minY,
+      maxY,
+    });
+    throw new Error(
+      "Building box extraction resulted in zero or negative dimensions"
+    );
+  }
+
+  console.log(
+    `Extracting DSM area: ${extractWidth}x${extractHeight} from ${width}x${height} at offset (${minX},${minY})`
+  );
+
+  // Create array for extracted data
+  const extractedData = new Float32Array(extractWidth * extractHeight);
+
+  // Copy data for building area only
+  for (let y = 0; y < extractHeight; y++) {
+    for (let x = 0; x < extractWidth; x++) {
+      const srcIdx = (minY + y) * width + (minX + x);
+      const dstIdx = y * extractWidth + x;
+      extractedData[dstIdx] = dsmData[srcIdx];
+    }
+  }
+
+  return {
+    data: extractedData,
+    width: extractWidth,
+    height: extractHeight,
+    offsetX: minX,
+    offsetY: minY,
+  };
 }
 
 /**

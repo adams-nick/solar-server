@@ -96,7 +96,7 @@ class RgbProcessor extends Processor {
 
         // Set default options
         const useMask = options.useMask !== false && maskBuffer;
-        const buildingMargin = 0;
+        const buildingMargin = options.buildingMargin || 0; // Ensure margin is 0 by default
 
         // Process the RGB GeoTIFF data
         let processedRgbGeoTiff;
@@ -183,16 +183,35 @@ class RgbProcessor extends Processor {
           }
         }
 
+        // Determine dimensions based on building boundaries if available
+        let dimensions = {
+          width: rgbMetadata.width,
+          height: rgbMetadata.height,
+        };
+
+        // If building boundaries are available, use them for dimensions
+        if (buildingBoundaries && buildingBoundaries.hasBuilding) {
+          dimensions = {
+            width: buildingBoundaries.width,
+            height: buildingBoundaries.height,
+          };
+
+          console.log(
+            `[RgbProcessor] Using building dimensions: ${dimensions.width}x${dimensions.height}`
+          );
+        }
+
         // Create the result object
         const result = {
           layerType: "rgb",
           metadata: {
             ...rgbMetadata,
             ...fetcherMetadata,
-            dimensions: {
+            dimensions, // Use building dimensions if available
+            fullDimensions: {
               width: rgbMetadata.width,
               height: rgbMetadata.height,
-            },
+            }, // Keep the original full dimensions
             bands: rgbRasters.length,
             hasMask: !!maskRaster,
           },

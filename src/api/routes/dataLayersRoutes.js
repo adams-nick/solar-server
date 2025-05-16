@@ -312,4 +312,84 @@ router.post("/hourly-shade", async (req, res) => {
   }
 });
 
+// Dedicated POST endpoint for DSM layer
+router.post("/dsm", async (req, res) => {
+  try {
+    const { location, radius = 50 } = req.body;
+
+    if (!location || !location.latitude || !location.longitude) {
+      return res.status(400).json({ error: "Invalid location data" });
+    }
+
+    console.log(
+      `Processing DSM layer for location: ${location.latitude}, ${location.longitude}`
+    );
+
+    try {
+      // Process DSM layer - buildingFocus will be handled internally
+      const result = await layerManager.processLayer("dsm", location, {
+        radius,
+        fallbackToSynthetic: false,
+      });
+
+      // The visualization will now contain both building focus and full image URLs
+      const visualizations = result.visualization;
+      console.log("DSM VISUALIZATIONS: ", visualizations);
+      // Return both sets of URLs
+      return res.json({
+        imageryQuality: result.metadata?.imageryQuality || "MEDIUM",
+        dataUrls: {
+          buildingFocus: visualizations,
+          fullImage: visualizations.fullImage,
+        },
+        layerType: "dsm",
+        metadata: {
+          ...result.metadata,
+          dimensions: result.metadata.dimensions,
+          hasMask: result.metadata.hasMask,
+          buildingBoundaries: result.buildingBoundaries?.hasBuilding
+            ? {
+                exists: true,
+                width: result.buildingBoundaries.width,
+                height: result.buildingBoundaries.height,
+              }
+            : { exists: false },
+          // DSM-specific metadata
+          elevationRange: result.metadata.elevationRange || {
+            min: null,
+            max: null,
+            unit: "meters",
+          },
+        },
+        bounds: result.bounds,
+      });
+    } catch (error) {
+      // Handle DSM-specific errors
+      if (
+        error.message &&
+        (error.message.includes("empty data") ||
+          error.message.includes("no data available") ||
+          error.message.includes("Received empty data") ||
+          error.message.includes("DSM data is not available"))
+      ) {
+        return res.status(404).json({
+          error: "No DSM data available for this location",
+          details: error.message,
+          location,
+        });
+      }
+
+      throw error;
+    }
+  } catch (error) {
+    console.error("DSM data layer error:", error);
+
+    // Return error response
+    res.status(500).json({
+      error: error.message || "Failed to fetch DSM data",
+      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
+    });
+  }
+});
+
 module.exports = router;

@@ -47,7 +47,21 @@ class RgbVisualizer extends Visualizer {
         // Get data from processed result
         const { rasters, metadata, buildingBoundaries, maskRaster } =
           processedData;
-        const { width, height } = metadata.dimensions || metadata;
+
+        // Get full image dimensions from fullDimensions or fall back to dimensions
+        const fullWidth =
+          metadata.fullDimensions?.width ||
+          metadata.dimensions?.width ||
+          metadata.width;
+        const fullHeight =
+          metadata.fullDimensions?.height ||
+          metadata.dimensions?.height ||
+          metadata.height;
+
+        // Log the dimensions we're using
+        console.log(
+          `[RgbVisualizer] Full image dimensions: ${fullWidth}x${fullHeight}`
+        );
 
         // Ensure we have 3 bands for RGB
         if (rasters.length !== 3) {
@@ -64,8 +78,8 @@ class RgbVisualizer extends Visualizer {
         console.log("[RgbVisualizer] Creating full image visualization");
         const fullImageDataUrl = await this.createRgbVisualization(
           rasters,
-          width,
-          height,
+          fullWidth,
+          fullHeight,
           maskRaster,
           null, // No building boundaries for full image
           maxDimension,
@@ -78,10 +92,12 @@ class RgbVisualizer extends Visualizer {
           console.log(
             "[RgbVisualizer] Creating building-focused visualization"
           );
+
+          // Use building boundaries directly
           buildingFocusDataUrl = await this.createRgbVisualization(
             rasters,
-            width,
-            height,
+            fullWidth, // We still need full width for indexing into rasters
+            fullHeight, // We still need full height for indexing into rasters
             maskRaster,
             buildingBoundaries,
             maxDimension,
@@ -128,6 +144,15 @@ class RgbVisualizer extends Visualizer {
       startY = minY;
       outputWidth = bWidth;
       outputHeight = bHeight;
+
+      console.log(
+        `[RgbVisualizer] Building boundaries: (${startX},${startY}) to (${
+          startX + outputWidth
+        },${startY + outputHeight})`
+      );
+      console.log(
+        `[RgbVisualizer] Building size: ${outputWidth}x${outputHeight}`
+      );
 
       // Create cropped rasters for each channel
       redRaster = new Array(outputWidth * outputHeight);
