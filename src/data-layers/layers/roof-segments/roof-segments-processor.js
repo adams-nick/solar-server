@@ -8,6 +8,7 @@
 
 const Processor = require("../../core/processor");
 
+const MINIMUM_SEGMENT_AREA = 15;
 /**
  * Processor implementation for roof segment data
  * @extends Processor
@@ -37,7 +38,7 @@ class RoofSegmentProcessor extends Processor {
    * @param {boolean} [options.calculateSuitability=true] - Whether to calculate suitability scores
    * @param {boolean} [options.includeSunshineData=true] - Whether to include detailed sunshine data
    * @param {number} [options.minSegmentDimension=1.5] - Minimum segment dimension in meters (width or length)
-   * @param {number} [options.minSegmentArea=11] - Minimum segment area in square meters
+   * @param {number} [options.minSegmentArea=MINIMUM_SEGMENT_AREA] - Minimum segment area in square meters
    * @param {boolean} [options.groupSimilarSegments=true] - Whether to group similar segments together
    * @param {number} [options.maxAzimuthDiff=5] - Maximum azimuth difference for grouping (in degrees)
    * @param {number} [options.maxPitchDiff=12] - Maximum pitch difference for grouping (in degrees)
@@ -64,7 +65,7 @@ class RoofSegmentProcessor extends Processor {
         const calculateSuitability = options.calculateSuitability !== false;
         const includeSunshineData = options.includeSunshineData !== false;
         const minSegmentDimension = options.minSegmentDimension || 1.5; // Default to 1.5 meter minimum dimension
-        const minSegmentArea = options.minSegmentArea || 11; // Default to 5 square meters minimum area
+        const minSegmentArea = options.minSegmentArea || MINIMUM_SEGMENT_AREA; // Default to 5 square meters minimum area
         const groupSimilarSegments = options.groupSimilarSegments !== false;
         const maxAzimuthDiff = options.maxAzimuthDiff || 5; // Default to 5 degrees
         const maxPitchDiff = options.maxPitchDiff || 12; // Default to 12 degrees

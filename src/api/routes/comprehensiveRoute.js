@@ -753,7 +753,7 @@ async function processMlServerRoofSegmentation(
 
     // Extract dimensions from RGB result
     const imageWidth = rgbResult.metadata?.dimensions?.width || 400;
-    const imageHeight = rgbResult.metadata?.dimensions?.height || 300;
+    const imageHeight = rgbResult.metadata?.dimensions?.height || 224;
 
     // Convert geocoordinates to pixel coordinates
     const pixelCoordinates = convertGeoToPixel({
@@ -761,7 +761,8 @@ async function processMlServerRoofSegmentation(
       imgHeight: imageHeight,
       buildingBoundingBox: buildingInsights.boundingBox,
       buildingCenter: buildingInsights.center,
-      roofSegments: buildingInsights.solarPotential?.roofSegmentStats || [],
+      roofSegments:
+        roofSegments || buildingInsights.solarPotential?.roofSegmentStats || [],
     });
 
     console.log("Converted pixel coordinates:", {
@@ -787,7 +788,7 @@ async function processMlServerRoofSegmentation(
 
     // Send request to ML server
     const startTime = Date.now();
-
+    console.log("comprehensive route ml request: ", requestData);
     const mlResponse = await axios.post(
       `${ML_SERVER_URL}/api/predict`,
       requestData,
