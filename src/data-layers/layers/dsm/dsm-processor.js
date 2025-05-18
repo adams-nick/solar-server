@@ -37,6 +37,8 @@ class DsmProcessor extends Processor {
    * Process raw DSM data
    * @param {Object|Buffer} rawData - The raw data from fetcher
    * @param {Object} options - Processing options
+   * @param {boolean} [options.cropToBuilding=true] - Whether to crop to building boundaries
+   * @param {Object} [options.targetDimensions] - Target dimensions to resample to
    * @returns {Promise<Object>} - Processed DSM data
    */
   async process(rawData, options = {}) {
@@ -73,39 +75,182 @@ class DsmProcessor extends Processor {
         const dsmRaster = dsmRasters[0];
 
         // Store raw DSM data for reference
-        const rawDsmRaster = [...dsmRaster]; // Clone to preserve
+        let rawDsmRaster = [...dsmRaster]; // Clone to preserve
 
         // Process the mask if available
         let maskRaster = null;
         let buildingBoundaries = null;
 
         if (maskBuffer) {
-          const processingResult = await this.processMask(
-            maskBuffer,
+          // Process mask data
+          try {
+            const processedMaskGeoTiff = await this.geotiffProcessor.process(
+              maskBuffer,
+              {
+                convertToArray: true,
+                page: 0,
+              }
+            );
+
+            // Check mask dimensions
+            const { metadata: maskMetadata, rasters: maskRasters } =
+              processedMaskGeoTiff;
+
+            if (
+              maskMetadata.width !== width ||
+              maskMetadata.height !== height
+            ) {
+              console.log(
+                `[DsmProcessor] Mask dimensions (${maskMetadata.width}x${maskMetadata.height}) don't match DSM (${width}x${height}). Resampling...`
+              );
+
+              // Resample the mask to match DSM dimensions
+              maskRaster = VisualizationUtils.resampleRaster(
+                maskRasters[0],
+                maskMetadata.width,
+                maskMetadata.height,
+                width,
+                height,
+                { method: "nearest" } // Use nearest for mask to preserve binary values
+              );
+            } else {
+              maskRaster = maskRasters[0];
+            }
+
+            // Find building boundaries
+            buildingBoundaries = VisualizationUtils.findBuildingBoundaries(
+              maskRaster,
+              width,
+              height,
+              { margin: 0 } // No margin to get exact building bounds
+            );
+
+            if (!buildingBoundaries.hasBuilding) {
+              console.warn(
+                "[DsmProcessor] No building found in mask, using default boundaries"
+              );
+              buildingBoundaries =
+                VisualizationUtils.createDefaultBuildingBoundaries(
+                  width,
+                  height
+                );
+
+              // Also update mask to match the default boundaries
+              maskRaster = VisualizationUtils.createDefaultMask(
+                width,
+                height,
+                buildingBoundaries
+              );
+            }
+          } catch (error) {
+            console.error(
+              `[DsmProcessor] Error processing mask: ${error.message}`
+            );
+            // Create defaults on error
+            buildingBoundaries =
+              VisualizationUtils.createDefaultBuildingBoundaries(width, height);
+            maskRaster = VisualizationUtils.createDefaultMask(
+              width,
+              height,
+              buildingBoundaries
+            );
+          }
+        } else {
+          // Create default mask and boundaries if not provided
+          console.log("[DsmProcessor] No mask provided, creating defaults");
+          buildingBoundaries =
+            VisualizationUtils.createDefaultBuildingBoundaries(width, height);
+          maskRaster = VisualizationUtils.createDefaultMask(
             width,
             height,
-            options
-          );
-
-          maskRaster = processingResult.maskRaster;
-          buildingBoundaries = processingResult.buildingBoundaries;
-        } else {
-          // Create default mask and boundaries if no mask provided
-          console.log("[DsmProcessor] Using default mask and boundaries");
-          maskRaster = this.createDefaultMask(width, height);
-          buildingBoundaries = this.createDefaultBuildingBoundaries(
-            width,
-            height
+            buildingBoundaries
           );
         }
 
         // Apply the mask to the DSM data
-        let maskedDsmRaster = this.applyMask(
-          dsmRaster,
+        let maskedDsmRaster = VisualizationUtils.applyMaskToData(
           maskRaster,
+          dsmRaster,
           width,
-          height
+          height,
+          {
+            threshold: 0,
+            nullValue: config.processing.NO_DATA_VALUE,
+          }
         );
+
+        // Check if we need to resample to target dimensions
+        if (
+          options.targetDimensions &&
+          (options.targetDimensions.width !== width ||
+            options.targetDimensions.height !== height)
+        ) {
+          console.log(
+            `[DsmProcessor] Resampling to target dimensions: ${options.targetDimensions.width}x${options.targetDimensions.height}`
+          );
+
+          // Resample DSM data
+          maskedDsmRaster = VisualizationUtils.resampleRaster(
+            maskedDsmRaster,
+            width,
+            height,
+            options.targetDimensions.width,
+            options.targetDimensions.height,
+            {
+              noDataValue: config.processing.NO_DATA_VALUE,
+              method: "bilinear",
+            }
+          );
+
+          // Also resample raw data
+          rawDsmRaster = VisualizationUtils.resampleRaster(
+            rawDsmRaster,
+            width,
+            height,
+            options.targetDimensions.width,
+            options.targetDimensions.height,
+            {
+              noDataValue: config.processing.NO_DATA_VALUE,
+              method: "bilinear",
+            }
+          );
+
+          // Resample mask
+          maskRaster = VisualizationUtils.resampleRaster(
+            maskRaster,
+            width,
+            height,
+            options.targetDimensions.width,
+            options.targetDimensions.height,
+            { method: "nearest" } // Use nearest for mask
+          );
+
+          // Update dimensions
+          const oldWidth = width;
+          const oldHeight = height;
+          const newWidth = options.targetDimensions.width;
+          const newHeight = options.targetDimensions.height;
+
+          // Scale building boundaries
+          if (buildingBoundaries) {
+            const scaleX = newWidth / oldWidth;
+            const scaleY = newHeight / oldHeight;
+
+            buildingBoundaries = {
+              minX: Math.floor(buildingBoundaries.minX * scaleX),
+              minY: Math.floor(buildingBoundaries.minY * scaleY),
+              maxX: Math.ceil(buildingBoundaries.maxX * scaleX),
+              maxY: Math.ceil(buildingBoundaries.maxY * scaleY),
+              width: Math.ceil(buildingBoundaries.width * scaleX),
+              height: Math.ceil(buildingBoundaries.height * scaleY),
+              hasBuilding: buildingBoundaries.hasBuilding,
+            };
+          }
+
+          // Update current dimensions
+          const currentWidth = newWidth;
+          const currentHeight = newHeight;
+        }
 
         // Find valid data range with percentile filtering
         const dataRange = this.calculateDataRange(maskedDsmRaster);
@@ -113,20 +258,94 @@ class DsmProcessor extends Processor {
         // Calculate statistics
         const statistics = this.calculateStatistics(maskedDsmRaster, dataRange);
 
+        // Determine current dimensions (after potential resampling)
+        let currentWidth = options.targetDimensions
+          ? options.targetDimensions.width
+          : width;
+        let currentHeight = options.targetDimensions
+          ? options.targetDimensions.height
+          : height;
+
+        // Crop data to building boundaries if requested
+        const cropEnabled = options.cropToBuilding !== false;
+        let croppedDsmRaster = maskedDsmRaster;
+        let croppedMaskRaster = maskRaster;
+        let croppedOriginalRaster = rawDsmRaster;
+        let croppedWidth = currentWidth;
+        let croppedHeight = currentHeight;
+        let croppedBounds = bounds;
+
+        if (
+          cropEnabled &&
+          buildingBoundaries &&
+          buildingBoundaries.hasBuilding
+        ) {
+          console.log("[DsmProcessor] Cropping data to building boundaries");
+
+          // Use the centralized utility for cropping
+          const cropResult = VisualizationUtils.cropRastersToBuilding(
+            maskedDsmRaster,
+            maskRaster,
+            currentWidth,
+            currentHeight,
+            buildingBoundaries,
+            {
+              originalRaster: rawDsmRaster,
+              noDataValue: config.processing.NO_DATA_VALUE,
+            }
+          );
+
+          croppedDsmRaster = cropResult.croppedRaster;
+          croppedMaskRaster = cropResult.croppedMaskRaster;
+          croppedOriginalRaster = cropResult.croppedOriginalRaster;
+          croppedWidth = buildingBoundaries.width;
+          croppedHeight = buildingBoundaries.height;
+
+          console.log(
+            `[DsmProcessor] Data cropped from ${currentWidth}x${currentHeight} to ${croppedWidth}x${croppedHeight}`
+          );
+
+          // Update bounds to reflect the cropped area
+          croppedBounds = VisualizationUtils.adjustBoundsToBuilding(
+            bounds,
+            currentWidth,
+            currentHeight,
+            buildingBoundaries
+          );
+
+          // Update building boundaries to be relative to the cropped image
+          buildingBoundaries =
+            VisualizationUtils.normalizeBuilding(buildingBoundaries);
+        } else {
+          console.log("[DsmProcessor] Data not cropped - using full raster");
+        }
+
         // Create the result object
         const result = {
           layerType: "dsm",
           metadata: {
-            dimensions: { width, height },
+            dimensions: {
+              width: croppedWidth,
+              height: croppedHeight,
+              originalWidth: width,
+              originalHeight: height,
+            },
             ...dsmMetadata,
             ...metadata,
             dataRange,
+            buildingBoundaries: buildingBoundaries
+              ? {
+                  exists: buildingBoundaries.hasBuilding,
+                  width: buildingBoundaries.width,
+                  height: buildingBoundaries.height,
+                }
+              : null,
           },
-          raster: maskedDsmRaster, // Using masked version as primary raster
-          originalRaster: rawDsmRaster, // Keep the original for reference
-          maskRaster,
+          raster: croppedDsmRaster, // Using cropped masked version as primary raster
+          originalRaster: croppedOriginalRaster, // Keep the cropped original for reference
+          maskRaster: croppedMaskRaster,
           buildingBoundaries,
-          bounds,
+          bounds: croppedBounds,
           statistics,
         };
 
@@ -216,272 +435,6 @@ class DsmProcessor extends Processor {
       );
       throw new Error(`Failed to process DSM GeoTIFF: ${error.message}`);
     }
-  }
-
-  /**
-   * Process mask data
-   * @private
-   * @param {Buffer} maskBuffer - Mask data buffer
-   * @param {number} dsmWidth - Width of DSM data
-   * @param {number} dsmHeight - Height of DSM data
-   * @param {Object} options - Processing options
-   * @returns {Promise<Object>} - Processed mask and building boundaries
-   */
-  async processMask(maskBuffer, dsmWidth, dsmHeight, options = {}) {
-    try {
-      console.log("[DsmProcessor] Processing mask data");
-
-      // Process the mask GeoTIFF
-      const processedMaskGeoTiff = await this.geotiffProcessor.process(
-        maskBuffer,
-        {
-          convertToArray: true,
-          noAutoScale: true,
-          ...options,
-        }
-      );
-
-      const { metadata: maskMetadata, rasters: maskRasters } =
-        processedMaskGeoTiff;
-
-      // Check dimensions match
-      let maskRaster = maskRasters[0];
-      if (
-        maskMetadata.width !== dsmWidth ||
-        maskMetadata.height !== dsmHeight
-      ) {
-        console.log(
-          `[DsmProcessor] Mask dimensions (${maskMetadata.width}x${maskMetadata.height}) don't match DSM (${dsmWidth}x${dsmHeight}). Resizing...`
-        );
-
-        maskRaster = this.resizeMask(
-          maskRaster,
-          maskMetadata.width,
-          maskMetadata.height,
-          dsmWidth,
-          dsmHeight
-        );
-      }
-
-      // Count non-zero values in mask
-      const nonZeroCount = maskRaster.filter((v) => v > 0).length;
-      console.log(
-        `[DsmProcessor] Mask has ${nonZeroCount} non-zero values out of ${
-          maskRaster.length
-        } (${((nonZeroCount / maskRaster.length) * 100).toFixed(2)}%)`
-      );
-
-      // Handle empty mask
-      if (nonZeroCount === 0) {
-        console.warn(
-          "[DsmProcessor] Mask has no non-zero values, creating default mask"
-        );
-        maskRaster = this.createDefaultMask(dsmWidth, dsmHeight);
-      }
-
-      // Find building boundaries
-      const buildingMargin =
-        options.buildingMargin || config.visualization.BUILDING_MARGIN || 20;
-
-      let buildingBoundaries = VisualizationUtils.findBuildingBoundaries(
-        maskRaster,
-        dsmWidth,
-        dsmHeight,
-        { margin: buildingMargin }
-      );
-
-      // Create default boundaries if none found
-      if (!buildingBoundaries.hasBuilding) {
-        console.warn(
-          "[DsmProcessor] No building found in mask, using default boundaries"
-        );
-        buildingBoundaries = this.createDefaultBuildingBoundaries(
-          dsmWidth,
-          dsmHeight
-        );
-      }
-
-      return { maskRaster, buildingBoundaries };
-    } catch (error) {
-      console.error(`[DsmProcessor] Error processing mask: ${error.message}`);
-
-      // Return defaults on error
-      const maskRaster = this.createDefaultMask(dsmWidth, dsmHeight);
-      const buildingBoundaries = this.createDefaultBuildingBoundaries(
-        dsmWidth,
-        dsmHeight
-      );
-
-      return { maskRaster, buildingBoundaries };
-    }
-  }
-
-  /**
-   * Create a default mask with a building region in the center
-   * @private
-   * @param {number} width - Width of mask
-   * @param {number} height - Height of mask
-   * @returns {Array} - Default mask data
-   */
-  createDefaultMask(width, height) {
-    const mask = new Array(width * height).fill(0);
-
-    // Create a building region in the center (30-70% of dimensions)
-    const startX = Math.floor(width * 0.3);
-    const endX = Math.floor(width * 0.7);
-    const startY = Math.floor(height * 0.3);
-    const endY = Math.floor(height * 0.7);
-
-    for (let y = startY; y < endY; y++) {
-      for (let x = startX; x < endX; x++) {
-        const idx = y * width + x;
-        mask[idx] = 1; // Mark as building
-      }
-    }
-
-    console.log(
-      `[DsmProcessor] Created default mask with building region (${startX},${startY}) to (${endX},${endY})`
-    );
-
-    return mask;
-  }
-
-  /**
-   * Create default building boundaries for center region
-   * @private
-   * @param {number} width - Width of image
-   * @param {number} height - Height of image
-   * @returns {Object} - Building boundaries object
-   */
-  createDefaultBuildingBoundaries(width, height) {
-    const minX = Math.floor(width * 0.3);
-    const maxX = Math.floor(width * 0.7);
-    const minY = Math.floor(height * 0.3);
-    const maxY = Math.floor(height * 0.7);
-
-    return {
-      minX,
-      maxX,
-      minY,
-      maxY,
-      width: maxX - minX,
-      height: maxY - minY,
-      hasBuilding: true,
-    };
-  }
-
-  /**
-   * Apply mask to DSM data
-   * @private
-   * @param {Array} dsmRaster - DSM raster data
-   * @param {Array} maskRaster - Mask raster data
-   * @param {number} width - Image width
-   * @param {number} height - Image height
-   * @returns {Array} - Masked DSM data
-   */
-  applyMask(dsmRaster, maskRaster, width, height) {
-    try {
-      const maskedRaster = new Array(dsmRaster.length);
-      const noDataValue = config.processing.NO_DATA_VALUE || -9999;
-      let maskedCount = 0;
-      let validCount = 0;
-
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const idx = y * width + x;
-
-          // Check if this pixel is inside mask and has valid DSM data
-          if (
-            maskRaster[idx] > 0 &&
-            dsmRaster[idx] !== noDataValue &&
-            !isNaN(dsmRaster[idx]) &&
-            isFinite(dsmRaster[idx])
-          ) {
-            maskedRaster[idx] = dsmRaster[idx];
-            validCount++;
-          } else {
-            maskedRaster[idx] = noDataValue;
-            maskedCount++;
-          }
-        }
-      }
-
-      console.log(
-        `[DsmProcessor] Masked ${maskedCount} pixels, kept ${validCount} valid pixels (${(
-          (validCount / dsmRaster.length) *
-          100
-        ).toFixed(2)}% of total)`
-      );
-
-      // Handle case with no valid data
-      if (validCount === 0) {
-        console.warn(
-          "[DsmProcessor] No valid pixels after masking, using original DSM data"
-        );
-        return dsmRaster; // Use original as fallback
-      }
-
-      return maskedRaster;
-    } catch (error) {
-      console.error(`[DsmProcessor] Error applying mask: ${error.message}`);
-      return dsmRaster; // Return original on error
-    }
-  }
-
-  /**
-   * Resize mask data to match DSM dimensions
-   * @private
-   * @param {Array} maskData - Original mask data
-   * @param {number} srcWidth - Source width
-   * @param {number} srcHeight - Source height
-   * @param {number} destWidth - Destination width
-   * @param {number} destHeight - Destination height
-   * @returns {Array} - Resized mask data
-   */
-  resizeMask(maskData, srcWidth, srcHeight, destWidth, destHeight) {
-    console.log(
-      `[DsmProcessor] Resizing mask from ${srcWidth}x${srcHeight} to ${destWidth}x${destHeight}`
-    );
-
-    const resizedMask = new Array(destWidth * destHeight).fill(0);
-
-    // Scaling factors
-    const scaleX = srcWidth / destWidth;
-    const scaleY = srcHeight / destHeight;
-
-    // Count non-zero values before and after
-    let srcNonZero = 0;
-    let destNonZero = 0;
-
-    // Count source non-zero values
-    for (let i = 0; i < maskData.length; i++) {
-      if (maskData[i] > 0) srcNonZero++;
-    }
-
-    // Perform resizing
-    for (let y = 0; y < destHeight; y++) {
-      for (let x = 0; x < destWidth; x++) {
-        // Find corresponding source position
-        const srcX = Math.min(Math.floor(x * scaleX), srcWidth - 1);
-        const srcY = Math.min(Math.floor(y * scaleY), srcHeight - 1);
-
-        const srcIdx = srcY * srcWidth + srcX;
-        const destIdx = y * destWidth + x;
-
-        // Copy value if source index is valid
-        if (srcIdx >= 0 && srcIdx < maskData.length) {
-          resizedMask[destIdx] = maskData[srcIdx];
-
-          if (maskData[srcIdx] > 0) destNonZero++;
-        }
-      }
-    }
-
-    console.log(
-      `[DsmProcessor] Mask resize: source had ${srcNonZero} non-zero pixels, destination has ${destNonZero} non-zero pixels`
-    );
-
-    return resizedMask;
   }
 
   /**

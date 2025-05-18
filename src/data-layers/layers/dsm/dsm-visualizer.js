@@ -40,10 +40,6 @@ class DsmVisualizer extends Visualizer {
    * @param {number} [options.maxDimension=400] - Maximum dimension for the output image
    * @param {Array<Object>} [options.palette] - Custom color palette to use
    * @param {string} [options.paletteName='RAINBOW'] - Name of predefined palette to use
-   * @param {boolean} [options.showLegend=true] - Whether to include a color legend
-   * @param {boolean} [options.showBorder=true] - Whether to show a border around the image
-   * @param {string} [options.borderColor='rgba(0,0,0,0.8)'] - Border color
-   * @param {number} [options.borderWidth=3] - Border width in pixels
    * @returns {Promise<string>} - Data URL of the visualization
    * @throws {Error} if visualization fails
    */
@@ -56,8 +52,7 @@ class DsmVisualizer extends Visualizer {
         this.validateProcessedData(processedData, ["raster", "metadata"]);
 
         // Get data and configuration
-        const { raster, maskRaster, metadata, buildingBoundaries } =
-          processedData;
+        const { raster, maskRaster, metadata } = processedData;
         const { width, height } = metadata.dimensions;
         const buildingFocus = options.buildingFocus !== false;
 
@@ -90,19 +85,7 @@ class DsmVisualizer extends Visualizer {
           }
         );
 
-        // Get the 2D context for adding additional elements
-        const ctx = canvas.getContext("2d");
-
-        // Add border around the entire image
-        if (options.showBorder !== false) {
-          this.addBorder(ctx, width, height, options);
-        }
-
-        // Add legend
-        if (options.showLegend !== false) {
-          this.addColorLegend(ctx, width, height, palette, min, max);
-        }
-
+        // Convert to data URL and return
         return VisualizationUtils.canvasToDataURL(canvas);
       });
     } catch (error) {
@@ -118,8 +101,9 @@ class DsmVisualizer extends Visualizer {
     }
   }
 
+  // Note: Border and legend methods are kept for future reference, but they are no longer called
   /**
-   * Add a border around the entire image
+   * Add a border around the entire image (not used)
    * @private
    * @param {CanvasRenderingContext2D} ctx - Canvas 2D context
    * @param {number} width - Canvas width
@@ -157,7 +141,7 @@ class DsmVisualizer extends Visualizer {
   }
 
   /**
-   * Add a color legend to the canvas
+   * Add a color legend to the canvas (not used)
    * @private
    * @param {CanvasRenderingContext2D} ctx - Canvas 2D context
    * @param {number} width - Canvas width

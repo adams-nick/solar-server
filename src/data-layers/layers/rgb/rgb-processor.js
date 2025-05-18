@@ -2,7 +2,7 @@
  * RGB layer processor for SolarScanner data-layers module
  *
  * Processes raw RGB layer data from GeoTIFF format into a structured
- * representation, including building boundary information.
+ * representation, including building boundary information and proper cropping.
  */
 
 const Processor = require("../../core/processor");
@@ -42,6 +42,8 @@ class RgbProcessor extends Processor {
    * @param {Object} options - Processing options
    * @param {boolean} [options.useMask=true] - Whether to use mask data if available
    * @param {number} [options.buildingMargin=0] - Margin to add around building boundaries
+   * @param {boolean} [options.cropToBuilding=true] - Whether to crop to building boundaries
+   * @param {Object} [options.targetDimensions] - Target dimensions to resample to
    * @returns {Promise<Object>} - Processed RGB data
    * @throws {Error} if processing fails
    */
@@ -97,6 +99,7 @@ class RgbProcessor extends Processor {
         // Set default options
         const useMask = options.useMask !== false && maskBuffer;
         const buildingMargin = options.buildingMargin || 0; // Ensure margin is 0 by default
+        const cropEnabled = options.cropToBuilding !== false; // Crop by default unless explicitly disabled
 
         // Process the RGB GeoTIFF data
         let processedRgbGeoTiff;
@@ -123,6 +126,10 @@ class RgbProcessor extends Processor {
           bounds,
         } = processedRgbGeoTiff;
 
+        // Get original dimensions
+        const width = rgbMetadata.width;
+        const height = rgbMetadata.height;
+
         // Process mask data if available
         let maskRaster = null;
         let buildingBoundaries = null;
@@ -148,57 +155,205 @@ class RgbProcessor extends Processor {
               maskMetadata.height !== rgbMetadata.height
             ) {
               console.warn(
-                "[RgbProcessor] Mask and RGB dimensions do not match. Mask will not be applied."
+                `[RgbProcessor] Mask dimensions (${maskMetadata.width}x${maskMetadata.height}) don't match RGB (${width}x${height}). Resampling...`
+              );
+
+              // Resample the mask to match RGB dimensions
+              maskRaster = VisualizationUtils.resampleRaster(
+                maskRasters[0],
+                maskMetadata.width,
+                maskMetadata.height,
+                width,
+                height,
+                { method: "nearest" } // Use nearest neighbor for masks to preserve binary values
               );
             } else {
               maskRaster = maskRasters[0];
+            }
 
-              // Extract building boundaries
-              try {
-                buildingBoundaries = VisualizationUtils.findBuildingBoundaries(
-                  maskRaster,
-                  maskMetadata.width,
-                  maskMetadata.height,
-                  { margin: buildingMargin }
+            // Extract building boundaries
+            try {
+              buildingBoundaries = VisualizationUtils.findBuildingBoundaries(
+                maskRaster,
+                width,
+                height,
+                { margin: buildingMargin }
+              );
+
+              if (buildingBoundaries.hasBuilding) {
+                console.log(
+                  `[RgbProcessor] Found building boundaries: (${buildingBoundaries.minX},${buildingBoundaries.minY}) to (${buildingBoundaries.maxX},${buildingBoundaries.maxY})`
                 );
+              } else {
+                console.warn("[RgbProcessor] No building found in mask data");
 
-                if (buildingBoundaries.hasBuilding) {
-                  console.log(
-                    `[RgbProcessor] Found building boundaries: (${buildingBoundaries.minX},${buildingBoundaries.minY}) to (${buildingBoundaries.maxX},${buildingBoundaries.maxY})`
+                // Create default building boundaries for center region if none found
+                buildingBoundaries =
+                  VisualizationUtils.createDefaultBuildingBoundaries(
+                    width,
+                    height
                   );
-                } else {
-                  console.warn("[RgbProcessor] No building found in mask data");
-                }
-              } catch (error) {
-                console.error(
-                  `[RgbProcessor] Error finding building boundaries: ${error.message}`
-                );
               }
+            } catch (error) {
+              console.error(
+                `[RgbProcessor] Error finding building boundaries: ${error.message}`
+              );
+
+              // Create default building boundaries as fallback
+              buildingBoundaries =
+                VisualizationUtils.createDefaultBuildingBoundaries(
+                  width,
+                  height
+                );
             }
           } catch (error) {
             console.warn(
               `[RgbProcessor] Failed to process mask data: ${error.message}`
             );
             // Continue without mask data
+
+            // Create default building boundaries and mask
+            buildingBoundaries =
+              VisualizationUtils.createDefaultBuildingBoundaries(width, height);
+            maskRaster = VisualizationUtils.createDefaultMask(
+              width,
+              height,
+              buildingBoundaries
+            );
+          }
+        } else {
+          // Create default building boundaries and mask if not provided
+          buildingBoundaries =
+            VisualizationUtils.createDefaultBuildingBoundaries(width, height);
+          maskRaster = VisualizationUtils.createDefaultMask(
+            width,
+            height,
+            buildingBoundaries
+          );
+        }
+
+        // Check if we need to resample to target dimensions
+        if (
+          options.targetDimensions &&
+          (options.targetDimensions.width !== width ||
+            options.targetDimensions.height !== height)
+        ) {
+          console.log(
+            `[RgbProcessor] Resampling to target dimensions: ${options.targetDimensions.width}x${options.targetDimensions.height}`
+          );
+
+          // Resample each RGB channel
+          let resampledRgbRasters = [];
+          for (let band = 0; band < rgbRasters.length; band++) {
+            resampledRgbRasters.push(
+              VisualizationUtils.resampleRaster(
+                rgbRasters[band],
+                width,
+                height,
+                options.targetDimensions.width,
+                options.targetDimensions.height,
+                { method: "bilinear" }
+              )
+            );
+          }
+
+          // Resample mask raster if available
+          let resampledMaskRaster = null;
+          if (maskRaster) {
+            resampledMaskRaster = VisualizationUtils.resampleRaster(
+              maskRaster,
+              width,
+              height,
+              options.targetDimensions.width,
+              options.targetDimensions.height,
+              { method: "nearest" } // Use nearest for mask to preserve binary values
+            );
+          }
+
+          // Update variables with resampled data
+          rgbRasters = resampledRgbRasters;
+          maskRaster = resampledMaskRaster;
+
+          // Also update dimensions
+          const oldWidth = width;
+          const oldHeight = height;
+          const newWidth = options.targetDimensions.width;
+          const newHeight = options.targetDimensions.height;
+
+          // Scale building boundaries to new dimensions
+          if (buildingBoundaries) {
+            const scaleX = newWidth / oldWidth;
+            const scaleY = newHeight / oldHeight;
+
+            buildingBoundaries = {
+              minX: Math.floor(buildingBoundaries.minX * scaleX),
+              minY: Math.floor(buildingBoundaries.minY * scaleY),
+              maxX: Math.ceil(buildingBoundaries.maxX * scaleX),
+              maxY: Math.ceil(buildingBoundaries.maxY * scaleY),
+              width: Math.ceil(buildingBoundaries.width * scaleX),
+              height: Math.ceil(buildingBoundaries.height * scaleY),
+              hasBuilding: buildingBoundaries.hasBuilding,
+            };
+
+            console.log(
+              `[RgbProcessor] Building boundaries scaled to new dimensions: (${buildingBoundaries.minX},${buildingBoundaries.minY}) to (${buildingBoundaries.maxX},${buildingBoundaries.maxY})`
+            );
           }
         }
 
-        // Determine dimensions based on building boundaries if available
-        let dimensions = {
-          width: rgbMetadata.width,
-          height: rgbMetadata.height,
-        };
+        // Determine current dimensions (after potential resampling)
+        let currentWidth = options.targetDimensions
+          ? options.targetDimensions.width
+          : width;
+        let currentHeight = options.targetDimensions
+          ? options.targetDimensions.height
+          : height;
 
-        // If building boundaries are available, use them for dimensions
-        if (buildingBoundaries && buildingBoundaries.hasBuilding) {
-          dimensions = {
-            width: buildingBoundaries.width,
-            height: buildingBoundaries.height,
-          };
+        // Crop RGB and mask data to building boundaries if requested
+        let croppedRgbRasters = rgbRasters;
+        let croppedMaskRaster = maskRaster;
+        let croppedWidth = currentWidth;
+        let croppedHeight = currentHeight;
+        let croppedBounds = bounds;
+
+        if (
+          cropEnabled &&
+          buildingBoundaries &&
+          buildingBoundaries.hasBuilding
+        ) {
+          console.log("[RgbProcessor] Cropping data to building boundaries");
+
+          // Use the centralized utility for cropping multi-band rasters
+          const cropResult = VisualizationUtils.cropRastersToBuilding(
+            rgbRasters,
+            maskRaster,
+            currentWidth,
+            currentHeight,
+            buildingBoundaries
+          );
+
+          croppedRgbRasters = cropResult.croppedRasters;
+          croppedMaskRaster = cropResult.croppedMaskRaster;
+          croppedWidth = buildingBoundaries.width;
+          croppedHeight = buildingBoundaries.height;
 
           console.log(
-            `[RgbProcessor] Using building dimensions: ${dimensions.width}x${dimensions.height}`
+            `[RgbProcessor] Data cropped from ${currentWidth}x${currentHeight} to ${croppedWidth}x${croppedHeight}`
           );
+
+          // Adjust bounds to reflect the cropped area
+          croppedBounds = VisualizationUtils.adjustBoundsToBuilding(
+            bounds,
+            currentWidth,
+            currentHeight,
+            buildingBoundaries
+          );
+
+          // Update building boundaries to be relative to the cropped image
+          buildingBoundaries =
+            VisualizationUtils.normalizeBuilding(buildingBoundaries);
+        } else {
+          console.log("[RgbProcessor] Data not cropped - using full raster");
         }
 
         // Create the result object
@@ -207,18 +362,26 @@ class RgbProcessor extends Processor {
           metadata: {
             ...rgbMetadata,
             ...fetcherMetadata,
-            dimensions, // Use building dimensions if available
-            fullDimensions: {
-              width: rgbMetadata.width,
-              height: rgbMetadata.height,
-            }, // Keep the original full dimensions
-            bands: rgbRasters.length,
-            hasMask: !!maskRaster,
+            dimensions: {
+              width: croppedWidth,
+              height: croppedHeight,
+              originalWidth: width,
+              originalHeight: height,
+            },
+            bands: croppedRgbRasters.length,
+            hasMask: !!croppedMaskRaster,
+            buildingBoundaries: buildingBoundaries
+              ? {
+                  exists: buildingBoundaries.hasBuilding,
+                  width: buildingBoundaries.width,
+                  height: buildingBoundaries.height,
+                }
+              : null,
           },
-          rasters: rgbRasters,
-          bounds,
+          rasters: croppedRgbRasters,
+          bounds: croppedBounds,
           buildingBoundaries,
-          maskRaster,
+          maskRaster: croppedMaskRaster,
         };
 
         console.log("[RgbProcessor] RGB processing complete");

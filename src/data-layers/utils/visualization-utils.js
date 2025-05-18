@@ -122,6 +122,259 @@ class VisualizationUtils {
   }
 
   /**
+   * Normalize building boundaries to be relative to the cropped image (0,0)
+   * @param {Object} buildingBoundaries - Original building boundaries
+   * @returns {Object} - Normalized building boundaries
+   */
+  static normalizeBuilding(buildingBoundaries) {
+    if (!buildingBoundaries) return null;
+
+    // Create copy with normalized coordinates relative to 0,0
+    return {
+      minX: 0,
+      minY: 0,
+      maxX: buildingBoundaries.width,
+      maxY: buildingBoundaries.height,
+      width: buildingBoundaries.width,
+      height: buildingBoundaries.height,
+      hasBuilding: buildingBoundaries.hasBuilding,
+      originalBoundaries: {
+        minX: buildingBoundaries.minX,
+        minY: buildingBoundaries.minY,
+        maxX: buildingBoundaries.maxX,
+        maxY: buildingBoundaries.maxY,
+      },
+    };
+  }
+
+  /**
+   * Adjust geographic bounds to reflect a cropped building area
+   * @param {Object} bounds - Original geographic bounds
+   * @param {number} width - Original width
+   * @param {number} height - Original height
+   * @param {Object} buildingBoundaries - Building boundaries in pixels
+   * @returns {Object} - Adjusted bounds for building area
+   */
+  static adjustBoundsToBuilding(bounds, width, height, buildingBoundaries) {
+    try {
+      const { minX, minY, width: bWidth, height: bHeight } = buildingBoundaries;
+
+      // Calculate proportions
+      const xPropStart = minX / width;
+      const yPropStart = minY / height;
+      const xPropEnd = (minX + bWidth) / width;
+      const yPropEnd = (minY + bHeight) / height;
+
+      // Interpolate the geographic bounds
+      const lonRange = bounds.east - bounds.west;
+      const latRange = bounds.north - bounds.south;
+
+      const newWest = bounds.west + xPropStart * lonRange;
+      const newEast = bounds.west + xPropEnd * lonRange;
+      const newSouth = bounds.south + yPropStart * latRange;
+      const newNorth = bounds.south + yPropEnd * latRange;
+
+      return {
+        west: newWest,
+        east: newEast,
+        south: newSouth,
+        north: newNorth,
+      };
+    } catch (error) {
+      console.error(`Error adjusting bounds: ${error.message}`);
+      return bounds; // Return original bounds on error
+    }
+  }
+
+  /**
+   * Create default building boundaries for center region
+   * @param {number} width - Width of image
+   * @param {number} height - Height of image
+   * @returns {Object} - Building boundaries object
+   */
+  static createDefaultBuildingBoundaries(width, height) {
+    const minX = Math.floor(width * 0.3);
+    const maxX = Math.floor(width * 0.7);
+    const minY = Math.floor(height * 0.3);
+    const maxY = Math.floor(height * 0.7);
+
+    return {
+      minX,
+      maxX,
+      minY,
+      maxY,
+      width: maxX - minX,
+      height: maxY - minY,
+      hasBuilding: true,
+    };
+  }
+
+  /**
+   * Create a default mask with a building region in the center
+   * @param {number} width - Width of mask
+   * @param {number} height - Height of mask
+   * @param {Object} boundaries - Building boundaries if available
+   * @returns {Array} - Default mask data
+   */
+  static createDefaultMask(width, height, boundaries = null) {
+    const mask = new Array(width * height).fill(0);
+
+    if (boundaries && boundaries.hasBuilding) {
+      // Use provided boundaries to create mask
+      const { minX, minY, maxX, maxY } = boundaries;
+
+      for (let y = minY; y <= maxY; y++) {
+        for (let x = minX; x <= maxX; x++) {
+          if (y >= 0 && y < height && x >= 0 && x < width) {
+            const idx = y * width + x;
+            mask[idx] = 1; // Mark as building
+          }
+        }
+      }
+
+      console.log(
+        `Created mask from boundaries: (${minX},${minY}) to (${maxX},${maxY})`
+      );
+    } else {
+      // Create a building region in the center (30-70% of dimensions)
+      const startX = Math.floor(width * 0.3);
+      const endX = Math.floor(width * 0.7);
+      const startY = Math.floor(height * 0.3);
+      const endY = Math.floor(height * 0.7);
+
+      for (let y = startY; y < endY; y++) {
+        for (let x = startX; x < endX; x++) {
+          const idx = y * width + x;
+          mask[idx] = 1; // Mark as building
+        }
+      }
+
+      console.log(
+        `Created default mask with building region (${startX},${startY}) to (${endX},${endY})`
+      );
+    }
+
+    return mask;
+  }
+
+  /**
+   * Crop multi-band raster data to building boundaries
+   * @param {Array<Array>|Array} rasters - Array of raster bands or single raster
+   * @param {Array} maskRaster - Optional mask raster
+   * @param {number} width - Original width
+   * @param {number} height - Original height
+   * @param {Object} buildingBoundaries - Building boundaries
+   * @param {Object} options - Optional parameters
+   * @param {*} [options.noDataValue=-9999] - Value for out-of-bounds areas
+   * @param {Array} [options.originalRaster] - Optional original raster to also crop
+   * @returns {Object} - Cropped rasters and mask
+   */
+  static cropRastersToBuilding(
+    rasters,
+    maskRaster,
+    width,
+    height,
+    buildingBoundaries,
+    options = {}
+  ) {
+    try {
+      const { minX, minY, width: bWidth, height: bHeight } = buildingBoundaries;
+      const noDataValue = options.noDataValue ?? -9999;
+
+      // Determine if we have multi-band data or a single raster
+      const isMultiBand = Array.isArray(rasters) && Array.isArray(rasters[0]);
+
+      // Create arrays for cropped data
+      const croppedRasters = isMultiBand
+        ? // Multi-band case (like RGB)
+          rasters.map(() => new Array(bWidth * bHeight))
+        : // Single band case (like DSM)
+          new Array(bWidth * bHeight);
+
+      // Create array for cropped mask if provided
+      const croppedMaskRaster = maskRaster ? new Array(bWidth * bHeight) : null;
+
+      // Create array for original raster if provided
+      const croppedOriginalRaster = options.originalRaster
+        ? new Array(bWidth * bHeight)
+        : null;
+
+      // Copy data
+      for (let y = 0; y < bHeight; y++) {
+        for (let x = 0; x < bWidth; x++) {
+          // Calculate source and destination indices
+          const srcIdx = (minY + y) * width + (minX + x);
+          const destIdx = y * bWidth + x;
+
+          if (isMultiBand) {
+            // Process each band for multi-band data
+            for (let b = 0; b < rasters.length; b++) {
+              croppedRasters[b][destIdx] =
+                srcIdx >= 0 && srcIdx < rasters[b].length
+                  ? rasters[b][srcIdx]
+                  : 0;
+            }
+          } else {
+            // Process single-band data
+            croppedRasters[destIdx] =
+              srcIdx >= 0 && srcIdx < rasters.length
+                ? rasters[srcIdx]
+                : noDataValue;
+          }
+
+          // Process mask if available
+          if (croppedMaskRaster && maskRaster) {
+            croppedMaskRaster[destIdx] =
+              srcIdx >= 0 && srcIdx < maskRaster.length
+                ? maskRaster[srcIdx]
+                : 0;
+          }
+
+          // Process original raster if available
+          if (croppedOriginalRaster && options.originalRaster) {
+            croppedOriginalRaster[destIdx] =
+              srcIdx >= 0 && srcIdx < options.originalRaster.length
+                ? options.originalRaster[srcIdx]
+                : noDataValue;
+          }
+        }
+      }
+
+      // Return appropriate format based on input type
+      if (isMultiBand) {
+        return {
+          croppedRasters,
+          croppedMaskRaster,
+        };
+      } else {
+        return {
+          croppedRaster: croppedRasters,
+          croppedMaskRaster,
+          croppedOriginalRaster,
+        };
+      }
+    } catch (error) {
+      console.error(`Error cropping rasters: ${error.message}`);
+
+      // Return original data as fallback
+      const isMultiBand = Array.isArray(rasters) && Array.isArray(rasters[0]);
+
+      if (isMultiBand) {
+        return {
+          croppedRasters: rasters,
+          croppedMaskRaster: maskRaster,
+        };
+      } else {
+        return {
+          croppedRaster: rasters,
+          croppedMaskRaster: maskRaster,
+          croppedOriginalRaster: options.originalRaster || null,
+        };
+      }
+    }
+  }
+
+  /**
    * Resize image dimensions while maintaining aspect ratio
    * @param {number} width - Original width
    * @param {number} height - Original height
@@ -170,6 +423,105 @@ class VisualizationUtils {
       // Return the original dimensions
       return { width, height, error: error.message };
     }
+  }
+
+  /**
+   * Resample raster data to target dimensions
+   * @param {Array} raster - Source raster data
+   * @param {number} srcWidth - Source width
+   * @param {number} srcHeight - Source height
+   * @param {number} destWidth - Target width
+   * @param {number} destHeight - Target height
+   * @param {Object} options - Resampling options
+   * @param {number} [options.noDataValue=-9999] - Value representing no data
+   * @param {string} [options.method='bilinear'] - Resampling method ('nearest' or 'bilinear')
+   * @returns {Array} - Resampled raster data
+   */
+  static resampleRaster(
+    raster,
+    srcWidth,
+    srcHeight,
+    destWidth,
+    destHeight,
+    options = {}
+  ) {
+    const noDataValue = options.noDataValue ?? -9999;
+    const method = options.method || "bilinear";
+
+    console.log(
+      `Resampling raster from ${srcWidth}x${srcHeight} to ${destWidth}x${destHeight} using ${method} method`
+    );
+
+    const resampledRaster = new Array(destWidth * destHeight);
+
+    // Scaling factors
+    const scaleX = srcWidth / destWidth;
+    const scaleY = srcHeight / destHeight;
+
+    if (method === "nearest") {
+      // Nearest neighbor (faster but less accurate)
+      for (let y = 0; y < destHeight; y++) {
+        for (let x = 0; x < destWidth; x++) {
+          const srcX = Math.min(Math.floor(x * scaleX), srcWidth - 1);
+          const srcY = Math.min(Math.floor(y * scaleY), srcHeight - 1);
+
+          const srcIdx = srcY * srcWidth + srcX;
+          const destIdx = y * destWidth + x;
+
+          resampledRaster[destIdx] = raster[srcIdx];
+        }
+      }
+    } else {
+      // Bilinear interpolation (better quality)
+      for (let y = 0; y < destHeight; y++) {
+        for (let x = 0; x < destWidth; x++) {
+          const srcX = x * scaleX;
+          const srcY = y * scaleY;
+
+          // Get integer and fractional parts
+          const x0 = Math.floor(srcX);
+          const y0 = Math.floor(srcY);
+          const x1 = Math.min(x0 + 1, srcWidth - 1);
+          const y1 = Math.min(y0 + 1, srcHeight - 1);
+
+          const dx = srcX - x0;
+          const dy = srcY - y0;
+
+          // Get the four nearest pixels
+          const idx00 = y0 * srcWidth + x0;
+          const idx01 = y0 * srcWidth + x1;
+          const idx10 = y1 * srcWidth + x0;
+          const idx11 = y1 * srcWidth + x1;
+
+          const v00 = raster[idx00];
+          const v01 = raster[idx01];
+          const v10 = raster[idx10];
+          const v11 = raster[idx11];
+
+          // Check if any is no-data
+          if (
+            v00 === noDataValue ||
+            v01 === noDataValue ||
+            v10 === noDataValue ||
+            v11 === noDataValue
+          ) {
+            resampledRaster[y * destWidth + x] = noDataValue;
+            continue;
+          }
+
+          // Bilinear interpolation
+          const value =
+            (1 - dx) * (1 - dy) * v00 +
+            dx * (1 - dy) * v01 +
+            (1 - dx) * dy * v10 +
+            dx * dy * v11;
+
+          resampledRaster[y * destWidth + x] = value;
+        }
+      }
+    }
+
+    return resampledRaster;
   }
 
   /**

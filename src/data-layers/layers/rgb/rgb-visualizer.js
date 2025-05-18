@@ -5,7 +5,6 @@
  */
 
 const Visualizer = require("../../core/visualizer");
-const VisualizationUtils = require("../../utils/visualization-utils");
 const config = require("../../config");
 
 /**
@@ -34,7 +33,7 @@ class RgbVisualizer extends Visualizer {
    * Create a visualization from processed RGB data
    * @param {Object} processedData - The processed RGB data
    * @param {Object} options - Visualization options
-   * @returns {Promise<string>} - Data URL of the visualization
+   * @returns {Promise<Object>} - Object with data URLs for full image and building focus views
    */
   async visualize(processedData, options = {}) {
     try {
@@ -48,20 +47,11 @@ class RgbVisualizer extends Visualizer {
         const { rasters, metadata, buildingBoundaries, maskRaster } =
           processedData;
 
-        // Get full image dimensions from fullDimensions or fall back to dimensions
-        const fullWidth =
-          metadata.fullDimensions?.width ||
-          metadata.dimensions?.width ||
-          metadata.width;
-        const fullHeight =
-          metadata.fullDimensions?.height ||
-          metadata.dimensions?.height ||
-          metadata.height;
+        // Get dimensions from metadata
+        const width = metadata.dimensions?.width || metadata.width;
+        const height = metadata.dimensions?.height || metadata.height;
 
-        // Log the dimensions we're using
-        console.log(
-          `[RgbVisualizer] Full image dimensions: ${fullWidth}x${fullHeight}`
-        );
+        console.log(`[RgbVisualizer] Image dimensions: ${width}x${height}`);
 
         // Ensure we have 3 bands for RGB
         if (rasters.length !== 3) {
@@ -70,38 +60,28 @@ class RgbVisualizer extends Visualizer {
           );
         }
 
-        // Set visualization options
-        const maxDimension =
-          options.maxDimension || config.visualization.MAX_DIMENSION;
-
-        // First, create full image visualization
+        // Create full image visualization
         console.log("[RgbVisualizer] Creating full image visualization");
         const fullImageDataUrl = await this.createRgbVisualization(
           rasters,
-          fullWidth,
-          fullHeight,
+          width,
+          height,
           maskRaster,
-          null, // No building boundaries for full image
-          maxDimension,
-          false // Not building focused
+          null // No building boundaries for full image
         );
 
-        // Then create building-focused visualization if building boundaries exist
+        // Create building-focused visualization if building boundaries exist
         let buildingFocusDataUrl = fullImageDataUrl; // Default to full image
         if (buildingBoundaries?.hasBuilding) {
           console.log(
             "[RgbVisualizer] Creating building-focused visualization"
           );
-
-          // Use building boundaries directly
           buildingFocusDataUrl = await this.createRgbVisualization(
             rasters,
-            fullWidth, // We still need full width for indexing into rasters
-            fullHeight, // We still need full height for indexing into rasters
+            width,
+            height,
             maskRaster,
-            buildingBoundaries,
-            maxDimension,
-            true // Building focused
+            buildingBoundaries
           );
         }
 
@@ -112,7 +92,6 @@ class RgbVisualizer extends Visualizer {
         };
       });
     } catch (error) {
-      // Log the error and re-throw it to be handled by the layer manager
       console.error(
         `[RgbVisualizer] Error creating visualization: ${error.message}`
       );
@@ -120,24 +99,26 @@ class RgbVisualizer extends Visualizer {
     }
   }
 
-  // Helper method to create visualization with specific settings
+  /**
+   * Create RGB visualization with specified settings
+   * @private
+   */
   async createRgbVisualization(
     rasters,
     width,
     height,
     maskRaster,
-    buildingBoundaries,
-    maxDimension,
-    buildingFocus
+    buildingBoundaries
   ) {
-    // Determine dimensions and cropping
+    // Determine if we're doing building-focused visualization
+    const buildingFocus = !!buildingBoundaries?.hasBuilding;
+
+    // Determine dimensions and source data
     let outputWidth, outputHeight, startX, startY;
     let redRaster, greenRaster, blueRaster;
 
-    if (buildingFocus && buildingBoundaries?.hasBuilding) {
+    if (buildingFocus) {
       // Use building boundaries for cropping
-      console.log("[RgbVisualizer] Using building focus for visualization");
-
       const { minX, minY, width: bWidth, height: bHeight } = buildingBoundaries;
 
       startX = minX;
@@ -145,11 +126,6 @@ class RgbVisualizer extends Visualizer {
       outputWidth = bWidth;
       outputHeight = bHeight;
 
-      console.log(
-        `[RgbVisualizer] Building boundaries: (${startX},${startY}) to (${
-          startX + outputWidth
-        },${startY + outputHeight})`
-      );
       console.log(
         `[RgbVisualizer] Building size: ${outputWidth}x${outputHeight}`
       );
@@ -171,7 +147,6 @@ class RgbVisualizer extends Visualizer {
       }
     } else {
       // Use full image
-      console.log("[RgbVisualizer] Using full image for visualization");
       startX = 0;
       startY = 0;
       outputWidth = width;
@@ -182,27 +157,9 @@ class RgbVisualizer extends Visualizer {
       blueRaster = rasters[2];
     }
 
-    // Apply max dimension limit if needed
-    let scaledWidth = outputWidth;
-    let scaledHeight = outputHeight;
-
-    if (outputWidth > maxDimension || outputHeight > maxDimension) {
-      const aspectRatio = outputWidth / outputHeight;
-      if (outputWidth > outputHeight) {
-        scaledWidth = maxDimension;
-        scaledHeight = Math.round(maxDimension / aspectRatio);
-      } else {
-        scaledHeight = maxDimension;
-        scaledWidth = Math.round(maxDimension * aspectRatio);
-      }
-      console.log(
-        `[RgbVisualizer] Resized to ${scaledWidth}x${scaledHeight} to fit max dimension`
-      );
-    }
-
-    // Create a mask array for cropping if needed
+    // Create mask array for cropping if needed
     let croppedMaskRaster = null;
-    if (maskRaster && buildingFocus && buildingBoundaries?.hasBuilding) {
+    if (maskRaster && buildingFocus) {
       croppedMaskRaster = new Array(outputWidth * outputHeight);
       for (let y = 0; y < outputHeight; y++) {
         for (let x = 0; x < outputWidth; x++) {
@@ -213,21 +170,15 @@ class RgbVisualizer extends Visualizer {
       }
     }
 
-    // Create canvas and context for the view
-    const { canvas, ctx } = this.createEmptyCanvas(scaledWidth, scaledHeight);
+    // Create canvas with exact output dimensions
+    const { canvas, ctx } = this.createEmptyCanvas(outputWidth, outputHeight);
+    const imageData = ctx.createImageData(outputWidth, outputHeight);
 
-    // Create image data
-    const imageData = ctx.createImageData(scaledWidth, scaledHeight);
-
-    // Fill the image data with RGB values (with optional scaling)
-    for (let y = 0; y < scaledHeight; y++) {
-      for (let x = 0; x < scaledWidth; x++) {
-        // Calculate source coordinates (if scaling)
-        const srcX = Math.floor(x * (outputWidth / scaledWidth));
-        const srcY = Math.floor(y * (outputHeight / scaledHeight));
-        const srcIdx = srcY * outputWidth + srcX;
-
-        const destIdx = (y * scaledWidth + x) * 4;
+    // Fill the image data with RGB values
+    for (let y = 0; y < outputHeight; y++) {
+      for (let x = 0; x < outputWidth; x++) {
+        const srcIdx = y * outputWidth + x;
+        const destIdx = (y * outputWidth + x) * 4;
 
         // Apply mask if available
         const useMask = buildingFocus && croppedMaskRaster;
