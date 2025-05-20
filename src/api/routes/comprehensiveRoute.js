@@ -15,6 +15,10 @@ const dataLayers = require("../../data-layers");
 // Import the processor and visualizer directly for roof segments
 const RoofSegmentProcessor = require("../../data-layers/layers/roof-segments/roof-segments-processor");
 const RoofSegmentVisualizer = require("../../data-layers/layers/roof-segments/roof-segments-visualizer");
+const {
+  VisualizationUtils,
+} = require("../../data-layers/utils/visualization-utils");
+// TODO const config = require("../../config");
 
 // ML server URL - should be configurable via environment variable
 const ML_SERVER_URL = process.env.ML_SERVER_URL || "http://localhost:8000";
@@ -303,6 +307,40 @@ async function processComprehensiveAnalysis(res, session) {
           });
         }
       }
+
+      // Process DSM data if available
+      if (processingResults.dataLayersResponse.dsmUrl) {
+        sendSSEEvent(res, "progress", {
+          progress: 45,
+          message: "Processing DSM data...",
+        });
+
+        try {
+          // Process the DSM layer
+          processingResults.dsmResult = await processDsmLayer(
+            location,
+            processingResults.dataLayersResponse,
+            processingResults.rgbResult
+          );
+
+          console.log(
+            "DSM processing complete. Dimensions:",
+            processingResults.dsmResult.metadata?.dimensions?.width +
+              "x" +
+              processingResults.dsmResult.metadata?.dimensions?.height
+          );
+        } catch (dsmError) {
+          console.error(
+            `Error processing DSM layer for analysis ${analysisId}:`,
+            dsmError
+          );
+          sendSSEEvent(res, "progress", {
+            progress: 45,
+            message: "DSM data processing failed, continuing with analysis...",
+            error: dsmError.message,
+          });
+        }
+      }
     } catch (error) {
       console.error(
         `Error fetching data layers for analysis ${analysisId}:`,
@@ -377,9 +415,59 @@ async function processComprehensiveAnalysis(res, session) {
           await processMlServerRoofSegmentation(
             processingResults.rgbResult,
             processingResults.buildingInsights,
-            processingResults.roofSegmentsResult?.data,
-            processingResults.dataLayersResponse
+            processingResults.roofSegmentsResult?.data
           );
+
+        // If we have both ML results and DSM data, generate solar panel layout
+        if (
+          processingResults.mlServerResult &&
+          processingResults.mlServerResult.success &&
+          processingResults.dsmResult &&
+          processingResults.dsmResult.raster
+        ) {
+          sendSSEEvent(res, "progress", {
+            progress: 75,
+            message: "Generating solar panel layout...",
+          });
+
+          try {
+            // Calculate real-world dimensions for the image
+            const realWorldDimensions = calculateRealWorldDimensions(
+              processingResults.rgbResult,
+              processingResults.buildingInsights
+            );
+
+            // Generate solar panel layout
+            const panelLayoutResult = generateSolarPanelLayout(
+              processingResults.mlServerResult.roof_segments || [],
+              processingResults.dsmResult,
+              realWorldDimensions,
+              processingResults.roofSegmentsResult?.data || []
+            );
+
+            // Add panel layout to ML result
+            processingResults.mlServerResult.panel_layout =
+              panelLayoutResult.panelLayout;
+            processingResults.mlServerResult.obstructions =
+              panelLayoutResult.obstructions;
+            processingResults.mlServerResult.layout_metadata =
+              panelLayoutResult.metadata;
+
+            console.log(
+              `Generated solar panel layout with ${panelLayoutResult.panelLayout.length} panels and ${panelLayoutResult.obstructions.length} obstructions`
+            );
+          } catch (layoutError) {
+            console.error(
+              `Error generating solar panel layout: ${layoutError.message}`
+            );
+            sendSSEEvent(res, "progress", {
+              progress: 75,
+              message:
+                "Solar panel layout generation failed, continuing with analysis...",
+              error: layoutError.message,
+            });
+          }
+        }
 
         // Send ML server results to client
         if (
@@ -391,12 +479,17 @@ async function processComprehensiveAnalysis(res, session) {
             type: "mlRoofSegments",
             segments: processingResults.mlServerResult.roof_segments || [],
             obstructions: processingResults.mlServerResult.obstructions || [],
+            panelLayout: processingResults.mlServerResult.panel_layout || [],
             dataUrl: processingResults.mlServerResult.visualization,
             metadata: {
               segmentCount:
                 processingResults.mlServerResult.roof_segments?.length || 0,
               obstructionCount:
                 processingResults.mlServerResult.obstructions?.length || 0,
+              panelCount:
+                processingResults.mlServerResult.panel_layout?.length || 0,
+              layoutMetadata:
+                processingResults.mlServerResult.layout_metadata || {},
               processingTime: processingResults.mlServerResult.processing_time,
             },
           });
@@ -668,7 +761,7 @@ async function processRgbLayer(location, dataLayersResponse) {
  * Process DSM layer using the layer manager
  * @param {Object} location - Location object with latitude and longitude
  * @param {Object} dataLayersResponse - Response from the data layers API
- * @param {Object} rgbDimensions - Dimensions to match from the RGB processing
+ * @param {Object} rgbResults - Processed RGB data to match dimensions
  * @returns {Promise<Object>} Processed DSM layer data
  */
 async function processDsmLayer(
@@ -901,14 +994,12 @@ async function processRoofSegments(buildingInsightsData) {
  * @param {Object} rgbResult - Processed RGB data
  * @param {Object} buildingInsights - Building insights data
  * @param {Array} roofSegments - Processed roof segments (optional)
- * @param {Object} dataLayersResponse - Data layers response from Google Solar API
  * @returns {Promise<Object>} ML server processing results
  */
 async function processMlServerRoofSegmentation(
   rgbResult,
   buildingInsights,
-  roofSegments = null,
-  dataLayersResponse = null
+  roofSegments = null
 ) {
   try {
     console.log("Processing ML server roof segmentation");
@@ -965,64 +1056,6 @@ async function processMlServerRoofSegmentation(
       roofSegments: pixelCoordinates.roofSegments.length,
     });
 
-    // Process DSM data if available - pass RGB dimensions to ensure consistency
-    let dsmData = null;
-
-    // Process DSM data if available - pass RGB results to ensure post-process alignment
-    if (dataLayersResponse && dataLayersResponse.dsmUrl) {
-      try {
-        console.log("Processing DSM data for ML server request");
-        const location = {
-          latitude: buildingInsights.center.latitude,
-          longitude: buildingInsights.center.longitude,
-        };
-
-        // Process the DSM data at native resolution first
-        const dsmResult = await processDsmLayer(
-          location,
-          dataLayersResponse,
-          rgbResult // Pass full RGB result instead of just dimensions
-        );
-
-        // Get final dimensions after potential resampling
-        const dsmWidth = dsmResult.metadata?.dimensions?.width;
-        const dsmHeight = dsmResult.metadata?.dimensions?.height;
-
-        // Log dimensions for verification
-        console.log(
-          "Dimensions check - RGB:",
-          `${imageWidth}x${imageHeight}`,
-          "DSM:",
-          `${dsmWidth}x${dsmHeight}`
-        );
-
-        if (dsmResult && dsmResult.raster) {
-          // Create DSM data for ML server
-          dsmData = {
-            // Convert to regular array for serialization if needed
-            elevationData: Array.isArray(dsmResult.raster)
-              ? dsmResult.raster
-              : Array.from(dsmResult.raster),
-            dimensions: {
-              width: dsmWidth,
-              height: dsmHeight,
-            },
-            dataRange: dsmResult.metadata.dataRange,
-          };
-
-          console.log("DSM data prepared for ML server:", {
-            dimensions: dsmData.dimensions,
-            dataRangePresent: !!dsmData.dataRange,
-            elevationDataLength: dsmData.elevationData.length,
-          });
-        }
-      } catch (dsmError) {
-        console.error("Error processing DSM data:", dsmError);
-        console.log("Continuing ML request without DSM data");
-        dsmData = null;
-      }
-    }
-
     // Create request data for ML server
     const requestData = {
       building_id: buildingId,
@@ -1034,20 +1067,9 @@ async function processMlServerRoofSegmentation(
       building_center: pixelCoordinates.buildingCenter,
     };
 
-    // Add DSM data if available
-    if (dsmData) {
-      requestData.dsm_data = dsmData;
-    }
-
     // Log the request data (without image data)
     const logData = { ...requestData };
     if (logData.rgb_image) logData.rgb_image = "[RGB IMAGE DATA URL]";
-    if (logData.dsm_data)
-      logData.dsm_data = {
-        dimensions: requestData.dsm_data.dimensions,
-        dataRange: requestData.dsm_data.dataRange,
-        elevationDataLength: requestData.dsm_data.elevationData.length,
-      };
 
     console.log("ML server request data:", JSON.stringify(logData, null, 2));
 
@@ -1059,7 +1081,7 @@ async function processMlServerRoofSegmentation(
       requestData,
       {
         headers: { "Content-Type": "application/json" },
-        timeout: 60000, // 60 second timeout for ML processing
+        timeout: 600000, // 60 second timeout for ML processing
       }
     );
 
@@ -1252,11 +1274,14 @@ function convertGeoToPixel(params) {
         };
 
         // Copy other properties that might be useful for ML
-        if (segment.pitchDegrees !== undefined)
-          segmentPixel.pitch = segment.pitchDegrees;
-        if (segment.azimuthDegrees !== undefined)
-          segmentPixel.azimuth = segment.azimuthDegrees;
-
+        if (segment.pitch !== undefined) segmentPixel.pitch = segment.pitch;
+        if (segment.azimuth !== undefined)
+          segmentPixel.azimuth = segment.azimuth;
+        if (segment.suitability !== undefined)
+          segmentPixel.suitability = segment.suitability;
+        if (segment.orientation !== undefined)
+          segmentPixel.orientation = segment.orientation;
+        if (segment.area !== undefined) segmentPixel.area = segment.area;
         roofSegmentsPixel.push(segmentPixel);
       }
     }
@@ -1277,6 +1302,442 @@ function convertGeoToPixel(params) {
     imageWidth: imgWidth,
     imageHeight: imgHeight,
   };
+}
+
+/**
+ * Calculate real-world dimensions from the image and building data
+ * @param {Object} rgbResult - Processed RGB data
+ * @param {Object} buildingInsights - Building insights data
+ * @returns {Object} - Real-world dimensions in meters
+ */
+function calculateRealWorldDimensions(rgbResult, buildingInsights) {
+  try {
+    // Extract pixel dimensions
+    const pixelWidth = rgbResult.metadata?.dimensions?.width || 0;
+    const pixelHeight = rgbResult.metadata?.dimensions?.height || 0;
+
+    if (pixelWidth === 0 || pixelHeight === 0) {
+      throw new Error("Invalid pixel dimensions");
+    }
+
+    // Get building bounding box from insights
+    const boundingBox = buildingInsights.boundingBox;
+
+    if (!boundingBox || !boundingBox.ne || !boundingBox.sw) {
+      throw new Error("Building bounding box not available");
+    }
+
+    // Calculate real-world width and height using Haversine formula
+    const earthRadius = 6371000; // meters
+
+    // Calculate width (east-west distance)
+    const dLng =
+      ((boundingBox.ne.longitude - boundingBox.sw.longitude) * Math.PI) / 180;
+    const lat =
+      (((boundingBox.ne.latitude + boundingBox.sw.latitude) / 2) * Math.PI) /
+      180;
+    const width = earthRadius * Math.cos(lat) * dLng;
+
+    // Calculate height (north-south distance)
+    const dLat =
+      ((boundingBox.ne.latitude - boundingBox.sw.latitude) * Math.PI) / 180;
+    const height = earthRadius * dLat;
+
+    // Calculate meters per pixel
+    const metersPerPixelX = width / pixelWidth;
+    const metersPerPixelY = height / pixelHeight;
+
+    console.log(
+      `Calculated real-world dimensions: ${width.toFixed(
+        2
+      )}m x ${height.toFixed(2)}m`
+    );
+    console.log(
+      `Meters per pixel: X=${metersPerPixelX.toFixed(
+        3
+      )}m/px, Y=${metersPerPixelY.toFixed(3)}m/px`
+    );
+
+    return {
+      width,
+      height,
+      metersPerPixelX,
+      metersPerPixelY,
+      pixelWidth,
+      pixelHeight,
+    };
+  } catch (error) {
+    console.error(`Error calculating real-world dimensions: ${error.message}`);
+    // Return default values based on typical urban aerial imagery resolution
+    return {
+      width: 50,
+      height: 50,
+      metersPerPixelX: 0.1,
+      metersPerPixelY: 0.1,
+      pixelWidth: 500,
+      pixelHeight: 500,
+    };
+  }
+}
+
+/**
+ * Check if a point is inside a polygon using ray casting algorithm
+ * @param {number} x - Point x coordinate
+ * @param {number} y - Point y coordinate
+ * @param {Array} polygon - Array of polygon points {x, y}
+ * @returns {boolean} - True if point is inside polygon
+ */
+function isPointInPolygon(x, y, polygon) {
+  let inside = false;
+
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x;
+    const yi = polygon[i].y;
+    const xj = polygon[j].x;
+    const yj = polygon[j].y;
+
+    // Check if ray from point crosses edge
+    const intersect =
+      yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
+
+    if (intersect) {
+      inside = !inside;
+    }
+  }
+
+  return inside;
+}
+
+/**
+ * Get bounding box of a polygon
+ * @param {Array} polygon - Array of points {x, y}
+ * @returns {Object} - Bounding box {minX, minY, maxX, maxY}
+ */
+function getPolygonBounds(polygon) {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  for (const point of polygon) {
+    minX = Math.min(minX, point.x);
+    minY = Math.min(minY, point.y);
+    maxX = Math.max(maxX, point.x);
+    maxY = Math.max(maxY, point.y);
+  }
+
+  return {
+    minX: Math.floor(minX),
+    minY: Math.floor(minY),
+    maxX: Math.ceil(maxX),
+    maxY: Math.ceil(maxY),
+  };
+}
+
+/**
+ * Convert rectangle coordinates to polygon points
+ * @param {number} x - X coordinate of top-left corner
+ * @param {number} y - Y coordinate of top-left corner
+ * @param {number} width - Width of rectangle
+ * @param {number} height - Height of rectangle
+ * @returns {Array} - Array of points defining the rectangle polygon
+ */
+function rectangleToPolygon(x, y, width, height) {
+  return [
+    { x: x, y: y }, // top-left
+    { x: x + width, y: y }, // top-right
+    { x: x + width, y: y + height }, // bottom-right
+    { x: x, y: y + height }, // bottom-left
+  ];
+}
+
+/**
+ * Generate solar panel layout based on roof polygons and DSM data
+ * @param {Array} roofSegments - Roof segments from ML server
+ * @param {Object} dsmData - Processed DSM data
+ * @param {Object} realWorldDimensions - Real-world dimensions
+ * @param {Array} originalRoofSegments - Original roof segments with metadata
+ * @returns {Object} - Solar panel layout and obstructions
+ */
+function generateSolarPanelLayout(
+  roofSegments,
+  dsmData,
+  realWorldDimensions,
+  originalRoofSegments
+) {
+  try {
+    console.log("Generating solar panel layout");
+
+    // Define panel dimensions (standard solar panel)
+    const panelWidth = 0.9; // meters
+    const panelHeight = 0.9; // meters
+
+    // Convert to pixels
+    const panelWidthPx = Math.round(
+      panelWidth / realWorldDimensions.metersPerPixelX
+    );
+    const panelHeightPx = Math.round(
+      panelHeight / realWorldDimensions.metersPerPixelY
+    );
+
+    console.log(
+      `Panel dimensions in pixels: ${panelWidthPx}px x ${panelHeightPx}px`
+    );
+
+    // Arrays to store results
+    const panelLayout = [];
+    const obstructions = [];
+
+    // Maximum slope deviation in degrees
+    const MAX_SLOPE_DEVIATION = 15;
+
+    // Process each roof segment
+    for (let i = 0; i < roofSegments.length; i++) {
+      const segment = roofSegments[i];
+
+      // Skip segments without polygons
+      if (!segment.polygon || segment.polygon.length < 3) {
+        console.log(`Skipping segment ${segment.id} - no valid polygon`);
+        continue;
+      }
+
+      console.log(`Processing segment ${segment.id} with area ${segment.area}`);
+
+      // Find matching original segment for metadata
+      const origSegment = originalRoofSegments.find(
+        (s) =>
+          s.segmentIndex?.toString() === segment.id.replace("segment_", "") ||
+          s.id === segment.id
+      );
+
+      // Extract metadata from original segment
+      const segmentPitch = origSegment?.pitch || segment.pitch || 20; // Default 20 degree pitch
+      const segmentAzimuth = origSegment?.azimuth || segment.azimuth || 180; // Default south-facing
+
+      console.log(
+        `Segment metadata - Pitch: ${segmentPitch}°, Azimuth: ${segmentAzimuth}°`
+      );
+
+      // Calculate baseline slope using segment pitch
+      const baselineSlope = Math.tan((segmentPitch * Math.PI) / 180);
+
+      // Get polygon bounding box
+      const bounds = getPolygonBounds(segment.polygon);
+
+      // Make sure bounds are within the image
+      bounds.minX = Math.max(0, bounds.minX);
+      bounds.minY = Math.max(0, bounds.minY);
+      bounds.maxX = Math.min(realWorldDimensions.pixelWidth - 1, bounds.maxX);
+      bounds.maxY = Math.min(realWorldDimensions.pixelHeight - 1, bounds.maxY);
+
+      // Iterate through bounds in panel-sized blocks
+      for (
+        let y = bounds.minY;
+        y <= bounds.maxY - panelHeightPx;
+        y += panelHeightPx
+      ) {
+        for (
+          let x = bounds.minX;
+          x <= bounds.maxX - panelWidthPx;
+          x += panelWidthPx
+        ) {
+          // Check if the center of this block is inside the polygon
+          const centerX = x + Math.floor(panelWidthPx / 2);
+          const centerY = y + Math.floor(panelHeightPx / 2);
+
+          if (isPointInPolygon(centerX, centerY, segment.polygon)) {
+            // Block is inside the polygon - check slope consistency
+            const { isValid, deviation, avgSlope } = checkBlockSlope(
+              dsmData.raster,
+              x,
+              y,
+              panelWidthPx,
+              panelHeightPx,
+              realWorldDimensions,
+              baselineSlope,
+              MAX_SLOPE_DEVIATION
+            );
+
+            if (isValid) {
+              // Add panel to layout
+              panelLayout.push({
+                id: `panel_${segment.id}_${panelLayout.length}`,
+                segmentId: segment.id,
+                x,
+                y,
+                width: panelWidthPx,
+                height: panelHeightPx,
+                realWidth: panelWidth,
+                realHeight: panelHeight,
+                pitch: segmentPitch,
+                azimuth: segmentAzimuth,
+                slope: avgSlope,
+                // Add polygon representation for panels
+                polygon: rectangleToPolygon(x, y, panelWidthPx, panelHeightPx),
+              });
+            } else {
+              // Add obstruction with polygon representation
+              obstructions.push({
+                id: `obstruction_${segment.id}_${obstructions.length}`,
+                segmentId: segment.id,
+                x,
+                y,
+                width: panelWidthPx,
+                height: panelHeightPx,
+                type: "slope_variance",
+                deviation: deviation,
+                // Add polygon representation for obstructions
+                polygon: rectangleToPolygon(x, y, panelWidthPx, panelHeightPx),
+              });
+            }
+          }
+        }
+      }
+    }
+
+    console.log(
+      `Generated layout with ${panelLayout.length} panels and ${obstructions.length} obstructions`
+    );
+
+    // Calculate total potential energy output
+    const totalArea = panelLayout.length * panelWidth * panelHeight;
+    const avgEfficiency = 0.2; // 20% panel efficiency
+    const avgIrradiance = 1000; // W/m² (standard test condition)
+    const totalPotentialKw = (totalArea * avgEfficiency * avgIrradiance) / 1000;
+
+    return {
+      panelLayout,
+      obstructions,
+      metadata: {
+        panelCount: panelLayout.length,
+        obstructionCount: obstructions.length,
+        totalArea: totalArea,
+        potentialKw: totalPotentialKw,
+        panelDimensions: {
+          width: panelWidth,
+          height: panelHeight,
+          widthPx: panelWidthPx,
+          heightPx: panelHeightPx,
+        },
+      },
+    };
+  } catch (error) {
+    console.error(`Error generating solar panel layout: ${error.message}`);
+    return {
+      panelLayout: [],
+      obstructions: [],
+      metadata: {
+        error: error.message,
+      },
+    };
+  }
+}
+
+/**
+ * Check block slope using DSM data with better error handling
+ * @param {Array} dsmRaster - DSM raster data
+ * @param {number} x - Block top-left X
+ * @param {number} y - Block top-left Y
+ * @param {number} width - Block width
+ * @param {number} height - Block height
+ * @param {Object} dimensions - Real-world dimensions
+ * @param {number} baselineSlope - Expected slope
+ * @param {number} maxDeviation - Maximum allowed deviation in degrees
+ * @returns {Object} - Validation result
+ */
+function checkBlockSlope(
+  dsmRaster,
+  x,
+  y,
+  width,
+  height,
+  dimensions,
+  baselineSlope,
+  maxDeviation
+) {
+  // If DSM data is missing, assume block is valid
+  if (!dsmRaster || !dimensions) {
+    return { isValid: true, deviation: 0, avgSlope: baselineSlope };
+  }
+
+  try {
+    // Get DSM values in the block
+    const dsmValues = [];
+    let totalValid = 0;
+
+    // Calculate slope in both X and Y directions
+    const slopes = [];
+
+    // Sample a few points in the block (both edges and interior)
+    const samplePoints = [
+      { x: x, y: y }, // Top-left
+      { x: x + width - 1, y: y }, // Top-right
+      { x: x, y: y + height - 1 }, // Bottom-left
+      { x: x + width - 1, y: y + height - 1 }, // Bottom-right
+      { x: x + Math.floor(width / 2), y: y + Math.floor(height / 2) }, // Center
+    ];
+
+    for (const point of samplePoints) {
+      // Skip if outside image bounds
+      if (
+        point.x < 0 ||
+        point.y < 0 ||
+        point.x >= dimensions.pixelWidth ||
+        point.y >= dimensions.pixelHeight
+      ) {
+        continue;
+      }
+
+      // Get DSM value at this point
+      const index = point.y * dimensions.pixelWidth + point.x;
+
+      if (index >= 0 && index < dsmRaster.length) {
+        const value = dsmRaster[index];
+
+        if (value !== undefined && !isNaN(value)) {
+          dsmValues.push(value);
+          totalValid++;
+        }
+      }
+    }
+
+    // Need at least 3 valid points to calculate slope
+    if (totalValid < 3) {
+      return { isValid: true, deviation: 0, avgSlope: baselineSlope };
+    }
+
+    // Calculate min/max height difference
+    const minHeight = Math.min(...dsmValues);
+    const maxHeight = Math.max(...dsmValues);
+    const heightDiff = maxHeight - minHeight;
+
+    // Convert height difference to slope angle
+    const blockDiagonalLength = Math.sqrt(
+      Math.pow(width * dimensions.metersPerPixelX, 2) +
+        Math.pow(height * dimensions.metersPerPixelY, 2)
+    );
+
+    // Calculate actual slope
+    const actualSlope = heightDiff / blockDiagonalLength;
+
+    // Compare with baseline slope
+    const baselineAngle = (Math.atan(baselineSlope) * 180) / Math.PI;
+    const actualAngle = (Math.atan(actualSlope) * 180) / Math.PI;
+    const deviation = Math.abs(actualAngle - baselineAngle);
+
+    // Valid if deviation is within allowed range
+    const isValid = deviation <= maxDeviation;
+
+    return {
+      isValid,
+      deviation,
+      avgSlope: actualSlope,
+    };
+  } catch (error) {
+    console.error(`Error checking block slope: ${error.message}`);
+    // Return valid as default in case of error
+    return { isValid: true, deviation: 0, avgSlope: baselineSlope };
+  }
 }
 
 module.exports = router;
