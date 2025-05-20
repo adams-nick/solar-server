@@ -1452,6 +1452,198 @@ function rectangleToPolygon(x, y, width, height) {
 }
 
 /**
+ * Fit a plane to 3D points using least squares method
+ * @param {Array} points - Array of {x,y,z} points
+ * @param {Object} dimensions - Real-world dimensions
+ * @returns {Object} - Fitted plane parameters
+ */
+function fitPlaneToPoints(points, dimensions) {
+  // Convert pixel coordinates to meters
+  const points3D = points.map((p) => ({
+    x: p.x * dimensions.metersPerPixelX,
+    y: p.y * dimensions.metersPerPixelY,
+    z: p.z, // Height in meters
+  }));
+
+  // Calculate centroid
+  const centroid = {
+    x: points3D.reduce((sum, p) => sum + p.x, 0) / points3D.length,
+    y: points3D.reduce((sum, p) => sum + p.y, 0) / points3D.length,
+    z: points3D.reduce((sum, p) => sum + p.z, 0) / points3D.length,
+  };
+
+  // Create covariance matrix components
+  let xx = 0,
+    xy = 0,
+    xz = 0,
+    yy = 0,
+    yz = 0;
+
+  for (const p of points3D) {
+    const dx = p.x - centroid.x;
+    const dy = p.y - centroid.y;
+    const dz = p.z - centroid.z;
+
+    xx += dx * dx;
+    xy += dx * dy;
+    xz += dx * dz;
+    yy += dy * dy;
+    yz += dy * dz;
+  }
+
+  // Solve for normal vector using least squares
+  const det_x = yy * xz - xy * yz;
+  const det_y = xy * xz - xx * yz;
+  const det = xx * yy - xy * xy;
+
+  // Avoid division by zero
+  if (Math.abs(det) < 1e-10) {
+    // Can't fit plane reliably, return default
+    return {
+      avgSlope: Math.sqrt(xz * xz + yz * yz),
+      normalVector: { x: 0, y: 0, z: 1 },
+    };
+  }
+
+  const a = det_x / det;
+  const b = det_y / det;
+
+  // Normal vector of the plane
+  const normalVector = { x: a, y: b, z: 1 };
+
+  // Calculate overall slope
+  const avgSlope = Math.sqrt(a * a + b * b);
+
+  return { avgSlope, normalVector };
+}
+
+/**
+ * Check block slope using DSM data with enhanced global slope matching
+ * @param {Array} dsmRaster - DSM raster data
+ * @param {number} x - Block top-left X
+ * @param {number} y - Block top-left Y
+ * @param {number} width - Block width
+ * @param {number} height - Block height
+ * @param {Object} dimensions - Real-world dimensions
+ * @param {number} baselineSlope - Expected slope from roof segment metadata
+ * @param {number} maxLocalDeviation - Maximum allowed local deviation in degrees
+ * @returns {Object} - Validation result
+ */
+function checkBlockSlope(
+  dsmRaster,
+  x,
+  y,
+  width,
+  height,
+  dimensions,
+  baselineSlope,
+  maxLocalDeviation
+) {
+  // Configurable threshold for global slope deviation (in degrees)
+  const MAX_GLOBAL_SLOPE_DEVIATION = 12;
+
+  // If DSM data is missing, assume block is valid
+  if (!dsmRaster || !dimensions) {
+    return { isValid: true, deviation: 0, avgSlope: baselineSlope };
+  }
+
+  try {
+    // Sample points in a grid pattern for better slope estimation
+    const dsmValues = [];
+    const dsmPoints = [];
+    let totalValid = 0;
+
+    // Use a 3x3 grid for sampling
+    const numSamplesX = 3;
+    const numSamplesY = 3;
+
+    for (let sy = 0; sy < numSamplesY; sy++) {
+      for (let sx = 0; sx < numSamplesX; sx++) {
+        const pointX = x + Math.floor((sx * width) / (numSamplesX - 1));
+        const pointY = y + Math.floor((sy * height) / (numSamplesY - 1));
+
+        // Skip if outside image bounds
+        if (
+          pointX < 0 ||
+          pointY < 0 ||
+          pointX >= dimensions.pixelWidth ||
+          pointY >= dimensions.pixelHeight
+        ) {
+          continue;
+        }
+
+        // Get DSM value at this point
+        const index = pointY * dimensions.pixelWidth + pointX;
+
+        if (index >= 0 && index < dsmRaster.length) {
+          const value = dsmRaster[index];
+
+          if (value !== undefined && !isNaN(value)) {
+            dsmValues.push(value);
+            dsmPoints.push({ x: pointX, y: pointY, z: value });
+            totalValid++;
+          }
+        }
+      }
+    }
+
+    // Need at least 4 valid points to calculate slope reliably
+    if (totalValid < 4) {
+      return { isValid: true, deviation: 0, avgSlope: baselineSlope };
+    }
+
+    // PART 1: Check for local slope consistency (sudden height changes)
+    const minHeight = Math.min(...dsmValues);
+    const maxHeight = Math.max(...dsmValues);
+    const heightDiff = maxHeight - minHeight;
+
+    // Convert height difference to slope angle for local consistency check
+    const blockDiagonalLength = Math.sqrt(
+      Math.pow(width * dimensions.metersPerPixelX, 2) +
+        Math.pow(height * dimensions.metersPerPixelY, 2)
+    );
+
+    // Calculate slope based on min/max difference (local consistency)
+    const localVarianceSlope = heightDiff / blockDiagonalLength;
+
+    // PART 2: Calculate global average slope using plane fitting
+    const { avgSlope, normalVector } = fitPlaneToPoints(dsmPoints, dimensions);
+
+    // Convert slopes to angles for comparison
+    const baselineAngle = (Math.atan(baselineSlope) * 180) / Math.PI;
+    const localVarianceAngle = (Math.atan(localVarianceSlope) * 180) / Math.PI;
+    const avgAngle = (Math.atan(avgSlope) * 180) / Math.PI;
+
+    // Calculate deviations
+    const localDeviation = Math.abs(localVarianceAngle - baselineAngle);
+    const globalDeviation = Math.abs(avgAngle - baselineAngle);
+
+    // Block is valid if both local and global deviations are acceptable
+    const isLocalValid = localDeviation <= maxLocalDeviation;
+    const isGlobalValid = globalDeviation <= MAX_GLOBAL_SLOPE_DEVIATION;
+    const isValid = isLocalValid && isGlobalValid;
+
+    return {
+      isValid,
+      localDeviation,
+      globalDeviation,
+      avgSlope,
+      baselineAngle,
+      avgAngle,
+      type: !isLocalValid
+        ? "local_variance"
+        : !isGlobalValid
+        ? "global_mismatch"
+        : "valid",
+    };
+  } catch (error) {
+    console.error(`Error checking block slope: ${error.message}`);
+    // Return valid as default in case of error
+    return { isValid: true, deviation: 0, avgSlope: baselineSlope };
+  }
+}
+
+/**
  * Generate solar panel layout based on roof polygons and DSM data
  * @param {Array} roofSegments - Roof segments from ML server
  * @param {Object} dsmData - Processed DSM data
@@ -1488,7 +1680,7 @@ function generateSolarPanelLayout(
     const panelLayout = [];
     const obstructions = [];
 
-    // Maximum slope deviation in degrees
+    // Maximum slope deviation in degrees (for local variance)
     const MAX_SLOPE_DEVIATION = 15;
 
     // Process each roof segment
@@ -1547,16 +1739,17 @@ function generateSolarPanelLayout(
 
           if (isPointInPolygon(centerX, centerY, segment.polygon)) {
             // Block is inside the polygon - check slope consistency
-            const { isValid, deviation, avgSlope } = checkBlockSlope(
-              dsmData.raster,
-              x,
-              y,
-              panelWidthPx,
-              panelHeightPx,
-              realWorldDimensions,
-              baselineSlope,
-              MAX_SLOPE_DEVIATION
-            );
+            const { isValid, localDeviation, globalDeviation, avgSlope, type } =
+              checkBlockSlope(
+                dsmData.raster,
+                x,
+                y,
+                panelWidthPx,
+                panelHeightPx,
+                realWorldDimensions,
+                baselineSlope,
+                MAX_SLOPE_DEVIATION
+              );
 
             if (isValid) {
               // Add panel to layout
@@ -1584,8 +1777,12 @@ function generateSolarPanelLayout(
                 y,
                 width: panelWidthPx,
                 height: panelHeightPx,
-                type: "slope_variance",
-                deviation: deviation,
+                type:
+                  type === "local_variance"
+                    ? "slope_variance"
+                    : "slope_mismatch",
+                localDeviation,
+                globalDeviation,
                 // Add polygon representation for obstructions
                 polygon: rectangleToPolygon(x, y, panelWidthPx, panelHeightPx),
               });
@@ -1630,113 +1827,6 @@ function generateSolarPanelLayout(
         error: error.message,
       },
     };
-  }
-}
-
-/**
- * Check block slope using DSM data with better error handling
- * @param {Array} dsmRaster - DSM raster data
- * @param {number} x - Block top-left X
- * @param {number} y - Block top-left Y
- * @param {number} width - Block width
- * @param {number} height - Block height
- * @param {Object} dimensions - Real-world dimensions
- * @param {number} baselineSlope - Expected slope
- * @param {number} maxDeviation - Maximum allowed deviation in degrees
- * @returns {Object} - Validation result
- */
-function checkBlockSlope(
-  dsmRaster,
-  x,
-  y,
-  width,
-  height,
-  dimensions,
-  baselineSlope,
-  maxDeviation
-) {
-  // If DSM data is missing, assume block is valid
-  if (!dsmRaster || !dimensions) {
-    return { isValid: true, deviation: 0, avgSlope: baselineSlope };
-  }
-
-  try {
-    // Get DSM values in the block
-    const dsmValues = [];
-    let totalValid = 0;
-
-    // Calculate slope in both X and Y directions
-    const slopes = [];
-
-    // Sample a few points in the block (both edges and interior)
-    const samplePoints = [
-      { x: x, y: y }, // Top-left
-      { x: x + width - 1, y: y }, // Top-right
-      { x: x, y: y + height - 1 }, // Bottom-left
-      { x: x + width - 1, y: y + height - 1 }, // Bottom-right
-      { x: x + Math.floor(width / 2), y: y + Math.floor(height / 2) }, // Center
-    ];
-
-    for (const point of samplePoints) {
-      // Skip if outside image bounds
-      if (
-        point.x < 0 ||
-        point.y < 0 ||
-        point.x >= dimensions.pixelWidth ||
-        point.y >= dimensions.pixelHeight
-      ) {
-        continue;
-      }
-
-      // Get DSM value at this point
-      const index = point.y * dimensions.pixelWidth + point.x;
-
-      if (index >= 0 && index < dsmRaster.length) {
-        const value = dsmRaster[index];
-
-        if (value !== undefined && !isNaN(value)) {
-          dsmValues.push(value);
-          totalValid++;
-        }
-      }
-    }
-
-    // Need at least 3 valid points to calculate slope
-    if (totalValid < 3) {
-      return { isValid: true, deviation: 0, avgSlope: baselineSlope };
-    }
-
-    // Calculate min/max height difference
-    const minHeight = Math.min(...dsmValues);
-    const maxHeight = Math.max(...dsmValues);
-    const heightDiff = maxHeight - minHeight;
-
-    // Convert height difference to slope angle
-    const blockDiagonalLength = Math.sqrt(
-      Math.pow(width * dimensions.metersPerPixelX, 2) +
-        Math.pow(height * dimensions.metersPerPixelY, 2)
-    );
-
-    // Calculate actual slope
-    const actualSlope = heightDiff / blockDiagonalLength;
-
-    // Compare with baseline slope
-    const baselineAngle = (Math.atan(baselineSlope) * 180) / Math.PI;
-    const actualAngle = (Math.atan(actualSlope) * 180) / Math.PI;
-    const deviation = Math.abs(actualAngle - baselineAngle);
-
-    // Valid if deviation is within allowed range
-    const isValid = deviation <= maxDeviation;
-
-    return {
-      isValid,
-      deviation,
-      avgSlope: actualSlope,
-    };
-  } catch (error) {
-    console.error(`Error checking block slope: ${error.message}`);
-    // Return valid as default in case of error
-    return { isValid: true, deviation: 0, avgSlope: baselineSlope };
   }
 }
 
