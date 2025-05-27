@@ -15,6 +15,7 @@ const dataLayers = require("../../data-layers");
 // Import the processor and visualizer directly for roof segments
 const RoofSegmentProcessor = require("../../data-layers/layers/roof-segments/roof-segments-processor");
 const RoofSegmentVisualizer = require("../../data-layers/layers/roof-segments/roof-segments-visualizer");
+const CombinedFluxDsmVisualizer = require("../../data-layers/combined-visualizers/combined-flux-dsm-visualizer");
 const {
   VisualizationUtils,
 } = require("../../data-layers/utils/visualization-utils");
@@ -192,7 +193,8 @@ async function processComprehensiveAnalysis(res, session) {
     buildingInsights: null,
     rgbResult: null,
     dsmResult: null,
-    annualFluxResult: null, // New: Annual flux processing result
+    annualFluxResult: null,
+    combinedVisualizationResult: null, // NEW: Combined flux+DSM visualization
     roofSegmentsResult: null,
     mlServerResult: null,
     dataLayersResponse: null,
@@ -244,7 +246,7 @@ async function processComprehensiveAnalysis(res, session) {
         hasRgbUrl: !!processingResults.dataLayersResponse.rgbUrl,
         hasDsmUrl: !!processingResults.dataLayersResponse.dsmUrl,
         hasMaskUrl: !!processingResults.dataLayersResponse.maskUrl,
-        hasAnnualFluxUrl: !!processingResults.dataLayersResponse.annualFluxUrl, // Check for annual flux
+        hasAnnualFluxUrl: !!processingResults.dataLayersResponse.annualFluxUrl,
         imageryQuality: processingResults.dataLayersResponse.imageryQuality,
       });
 
@@ -256,36 +258,22 @@ async function processComprehensiveAnalysis(res, session) {
         });
 
         try {
-          // Process the RGB layer with proper visualization
           processingResults.rgbResult = await processRgbLayer(
             location,
             processingResults.dataLayersResponse
           );
 
           console.log(
-            "RGB processing complete. Full metadata:",
-            JSON.stringify(processingResults.rgbResult.metadata, null, 2)
-          );
-          console.log(
-            "RGB dimensions from metadata:",
+            "RGB processing complete. Dimensions:",
             processingResults.rgbResult.metadata?.dimensions?.width +
               "x" +
               processingResults.rgbResult.metadata?.dimensions?.height
-          );
-          console.log(
-            "RGB buildingBoundaries:",
-            JSON.stringify(
-              processingResults.rgbResult.buildingBoundaries,
-              null,
-              2
-            )
           );
 
           // Send RGB visualization to client
           sendSSEEvent(res, "visualization", {
             progress: 35,
             type: "rgb",
-            // Include the processed dataUrls with both views
             dataUrls: processingResults.rgbResult.dataUrls,
             metadata: {
               imageryDate: processingResults.dataLayersResponse.imageryDate,
@@ -320,7 +308,6 @@ async function processComprehensiveAnalysis(res, session) {
         });
 
         try {
-          // Process the DSM layer
           processingResults.dsmResult = await processDsmLayer(
             location,
             processingResults.dataLayersResponse,
@@ -346,7 +333,7 @@ async function processComprehensiveAnalysis(res, session) {
         }
       }
 
-      // NEW: Process Annual Flux data if available
+      // Process Annual Flux data if available
       if (processingResults.dataLayersResponse.annualFluxUrl) {
         sendSSEEvent(res, "progress", {
           progress: 42,
@@ -354,7 +341,6 @@ async function processComprehensiveAnalysis(res, session) {
         });
 
         try {
-          // Process the annual flux layer
           processingResults.annualFluxResult = await processAnnualFluxLayer(
             location,
             processingResults.dataLayersResponse,
@@ -397,13 +383,83 @@ async function processComprehensiveAnalysis(res, session) {
           });
         }
       }
+
+      // NEW: Create Combined Flux+DSM Visualization if both are available
+      // NEW: Create Combined Flux+DSM Visualization if both are available
+      if (processingResults.annualFluxResult && processingResults.dsmResult) {
+        sendSSEEvent(res, "progress", {
+          progress: 47,
+          message:
+            "Creating enhanced flux+DSM visualization for ML analysis...",
+        });
+
+        try {
+          console.log("=== COMBINED VISUALIZATION DEBUG ===");
+          console.log("About to create combined visualization...");
+
+          processingResults.combinedVisualizationResult =
+            await createCombinedFluxDsmVisualization(
+              processingResults.annualFluxResult,
+              processingResults.dsmResult
+            );
+
+          console.log("Combined visualization result:", {
+            success: !!processingResults.combinedVisualizationResult,
+            enhanced: processingResults.combinedVisualizationResult?.enhanced,
+            hasDataUrls:
+              !!processingResults.combinedVisualizationResult?.dataUrls,
+            hasBuildingFocus:
+              !!processingResults.combinedVisualizationResult?.dataUrls
+                ?.buildingFocus,
+          });
+
+          console.log("Combined flux+DSM visualization created successfully");
+
+          // Send combined visualization to client
+          sendSSEEvent(res, "visualization", {
+            progress: 48,
+            type: "combinedFluxDsm",
+            dataUrls: processingResults.combinedVisualizationResult.dataUrls,
+            metadata: {
+              enhanced: processingResults.combinedVisualizationResult.enhanced,
+              blendMode:
+                processingResults.combinedVisualizationResult.metadata
+                  ?.blendMode,
+              dsmInfluence:
+                processingResults.combinedVisualizationResult.metadata
+                  ?.dsmInfluence,
+              dimensions:
+                processingResults.combinedVisualizationResult.metadata
+                  ?.dimensions,
+            },
+          });
+        } catch (combinedError) {
+          console.error(
+            `Error creating combined flux+DSM visualization for analysis ${analysisId}:`,
+            combinedError
+          );
+
+          // IMPORTANT: Make sure we don't set combinedVisualizationResult to undefined
+          console.log(
+            "Setting combinedVisualizationResult to null due to error"
+          );
+          processingResults.combinedVisualizationResult = null;
+
+          sendSSEEvent(res, "progress", {
+            progress: 48,
+            message:
+              "Combined visualization failed, will use individual data for analysis...",
+            error: combinedError.message,
+          });
+        }
+      }
     } catch (error) {
       console.error(
         `Error fetching data layers for analysis ${analysisId}:`,
         error
       );
       sendSSEEvent(res, "progress", {
-        progress: 45,
+        progress: 48,
         message: "Data layers unavailable, continuing with roof segments...",
         error: error.message,
       });
@@ -417,13 +473,11 @@ async function processComprehensiveAnalysis(res, session) {
       });
 
       try {
-        // Process roof segments using real implementation
         processingResults.roofSegmentsResult = await processRoofSegments(
           processingResults.buildingInsights
         );
 
         if (processingResults.roofSegmentsResult.available) {
-          // Send real roof segment visualization to client
           sendSSEEvent(res, "visualization", {
             progress: 60,
             type: "roofSegments",
@@ -434,7 +488,6 @@ async function processComprehensiveAnalysis(res, session) {
             available: true,
           });
         } else {
-          // Send error that roof segments couldn't be processed
           sendSSEEvent(res, "progress", {
             progress: 60,
             message:
@@ -458,25 +511,76 @@ async function processComprehensiveAnalysis(res, session) {
       }
     }
 
-    // Step 5: Process ML server roof segmentation (UPDATED to use annual flux instead of RGB)
-    if (
-      processingResults.annualFluxResult &&
-      processingResults.buildingInsights
-    ) {
+    // Step 5: Process ML server roof segmentation (UPDATED to use combined visualization)
+    // Step 5: Process ML server roof segmentation (UPDATED to use combined visualization)
+    if (processingResults.buildingInsights) {
       sendSSEEvent(res, "progress", {
         progress: 70,
-        message:
-          "Processing advanced roof segmentation with ML using solar flux data...",
+        message: "Processing advanced roof segmentation with ML...",
       });
 
       try {
-        // Process with ML server using annual flux instead of RGB
-        processingResults.mlServerResult =
-          await processMlServerRoofSegmentationWithFlux(
-            processingResults.annualFluxResult, // Use annual flux instead of RGB
+        // DEBUG: Check what results we have available
+        console.log("=== ML PROCESSING DEBUG ===");
+        console.log(
+          "Has combinedVisualizationResult:",
+          !!processingResults.combinedVisualizationResult
+        );
+        console.log(
+          "Has annualFluxResult:",
+          !!processingResults.annualFluxResult
+        );
+        console.log("Has rgbResult:", !!processingResults.rgbResult);
+
+        if (processingResults.combinedVisualizationResult) {
+          console.log(
+            "Combined result keys:",
+            Object.keys(processingResults.combinedVisualizationResult)
+          );
+          console.log(
+            "Combined result enhanced:",
+            processingResults.combinedVisualizationResult.enhanced
+          );
+          console.log(
+            "Combined result has dataUrls:",
+            !!processingResults.combinedVisualizationResult.dataUrls
+          );
+        }
+
+        // Priority order: Combined visualization > Annual Flux > RGB
+        let mlResult = null;
+
+        if (processingResults.combinedVisualizationResult) {
+          // Use the combined flux+DSM visualization (BEST OPTION)
+          console.log(
+            "Using combined flux+DSM visualization for ML processing"
+          );
+          mlResult = await processMlServerRoofSegmentationWithCombined(
+            processingResults.combinedVisualizationResult,
             processingResults.buildingInsights,
             processingResults.roofSegmentsResult?.data
           );
+        } else if (processingResults.annualFluxResult) {
+          // Fallback to annual flux only
+          console.log("Using annual flux data for ML processing (fallback)");
+          mlResult = await processMlServerRoofSegmentationWithFlux(
+            processingResults.annualFluxResult,
+            processingResults.buildingInsights,
+            processingResults.roofSegmentsResult?.data
+          );
+        } else if (processingResults.rgbResult) {
+          // Final fallback to RGB
+          console.log("Using RGB data for ML processing (final fallback)");
+          mlResult = await processMlServerRoofSegmentation(
+            processingResults.rgbResult,
+            processingResults.buildingInsights,
+            processingResults.roofSegmentsResult?.data
+          );
+        }
+
+        processingResults.mlServerResult = mlResult;
+
+        // ... rest of the ML processing code remains the same
 
         // If we have ML results, generate solar panel layout and obstructions
         if (
@@ -491,11 +595,13 @@ async function processComprehensiveAnalysis(res, session) {
           try {
             // Calculate real-world dimensions for the image
             const realWorldDimensions = calculateRealWorldDimensions(
-              processingResults.annualFluxResult, // Use annual flux dimensions
+              processingResults.combinedVisualizationResult ||
+                processingResults.annualFluxResult ||
+                processingResults.rgbResult,
               processingResults.buildingInsights
             );
 
-            // Generate obstructions using 0.5m dimensions (optimized from original approach)
+            // Generate obstructions using the DSM data
             const obstructionResult = detectObstructions(
               processingResults.mlServerResult.roof_segments || [],
               processingResults.dsmResult,
@@ -503,28 +609,25 @@ async function processComprehensiveAnalysis(res, session) {
               processingResults.roofSegmentsResult?.data || []
             );
 
-            // Make sure obstructions are properly preserved in the ML server result
             if (!processingResults.mlServerResult.obstructions) {
               processingResults.mlServerResult.obstructions = [];
             }
 
-            // Store detailed obstructions
             processingResults.mlServerResult.obstructions =
               obstructionResult.obstructions;
             console.log(
               `Detected ${obstructionResult.obstructions.length} obstructions`
             );
 
-            // Now generate optimal panel layout using the solarPanelAnalysis module
+            // Generate optimal panel layout
             const optimalLayoutResult =
               solarPanelAnalysis.generateOptimalPanelLayout(
                 processingResults.mlServerResult.roof_segments || [],
-                obstructionResult.obstructions || [], // Use the obstructions we detected
+                obstructionResult.obstructions || [],
                 realWorldDimensions,
                 processingResults.dsmResult
               );
 
-            // Add optimal panel layout to ML result
             processingResults.mlServerResult.panel_layout =
               optimalLayoutResult.panelLayout;
             processingResults.mlServerResult.layout_metadata =
@@ -547,12 +650,10 @@ async function processComprehensiveAnalysis(res, session) {
         }
 
         // Send ML server results to client
-        // CRITICAL: Ensuring obstructions are preserved
         if (
           processingResults.mlServerResult &&
           processingResults.mlServerResult.success
         ) {
-          // Log the obstructions data for debugging
           console.log(
             `Found ${
               processingResults.mlServerResult.obstructions?.length || 0
@@ -576,7 +677,15 @@ async function processComprehensiveAnalysis(res, session) {
               layoutMetadata:
                 processingResults.mlServerResult.layout_metadata || {},
               processingTime: processingResults.mlServerResult.processing_time,
-              usingFluxData: true, // Indicate we used flux data instead of RGB
+              usingCombinedData:
+                !!processingResults.combinedVisualizationResult,
+              usingFluxData:
+                !!processingResults.annualFluxResult &&
+                !processingResults.combinedVisualizationResult,
+              usingRgbData:
+                !!processingResults.rgbResult &&
+                !processingResults.annualFluxResult &&
+                !processingResults.combinedVisualizationResult,
             },
           });
         } else {
@@ -586,119 +695,6 @@ async function processComprehensiveAnalysis(res, session) {
             error:
               processingResults.mlServerResult?.error ||
               "Unknown ML processing error",
-          });
-        }
-      } catch (mlError) {
-        console.error(
-          `Error processing ML server roof segmentation for analysis ${analysisId}:`,
-          mlError
-        );
-        sendSSEEvent(res, "progress", {
-          progress: 80,
-          message: "ML roof segmentation failed, continuing with analysis...",
-          error: mlError.message,
-        });
-      }
-    } else if (
-      processingResults.rgbResult &&
-      processingResults.buildingInsights
-    ) {
-      // Fallback to RGB if annual flux is not available
-      sendSSEEvent(res, "progress", {
-        progress: 70,
-        message:
-          "Processing advanced roof segmentation with ML using RGB data (fallback)...",
-      });
-
-      try {
-        // Process with ML server using RGB as fallback
-        processingResults.mlServerResult =
-          await processMlServerRoofSegmentation(
-            processingResults.rgbResult,
-            processingResults.buildingInsights,
-            processingResults.roofSegmentsResult?.data
-          );
-
-        // Continue with the same obstruction detection and panel layout logic...
-        // (Same as above but using RGB result instead of annual flux result)
-        if (
-          processingResults.mlServerResult &&
-          processingResults.mlServerResult.success
-        ) {
-          sendSSEEvent(res, "progress", {
-            progress: 75,
-            message: "Detecting obstructions and generating panel layout...",
-          });
-
-          try {
-            const realWorldDimensions = calculateRealWorldDimensions(
-              processingResults.rgbResult,
-              processingResults.buildingInsights
-            );
-
-            const obstructionResult = detectObstructions(
-              processingResults.mlServerResult.roof_segments || [],
-              processingResults.dsmResult,
-              realWorldDimensions,
-              processingResults.roofSegmentsResult?.data || []
-            );
-
-            if (!processingResults.mlServerResult.obstructions) {
-              processingResults.mlServerResult.obstructions = [];
-            }
-
-            processingResults.mlServerResult.obstructions =
-              obstructionResult.obstructions;
-
-            const optimalLayoutResult =
-              solarPanelAnalysis.generateOptimalPanelLayout(
-                processingResults.mlServerResult.roof_segments || [],
-                obstructionResult.obstructions || [],
-                realWorldDimensions,
-                processingResults.dsmResult
-              );
-
-            processingResults.mlServerResult.panel_layout =
-              optimalLayoutResult.panelLayout;
-            processingResults.mlServerResult.layout_metadata =
-              optimalLayoutResult.metadata;
-          } catch (layoutError) {
-            console.error(
-              `Error detecting obstructions and generating panel layout: ${layoutError.message}`
-            );
-            sendSSEEvent(res, "progress", {
-              progress: 75,
-              message:
-                "Obstruction detection and panel layout generation failed, continuing with analysis...",
-              error: layoutError.message,
-            });
-          }
-        }
-
-        // Send results with RGB fallback indicator
-        if (
-          processingResults.mlServerResult &&
-          processingResults.mlServerResult.success
-        ) {
-          sendSSEEvent(res, "visualization", {
-            progress: 80,
-            type: "mlRoofSegments",
-            segments: processingResults.mlServerResult.roof_segments || [],
-            obstructions: processingResults.mlServerResult.obstructions || [],
-            panelLayout: processingResults.mlServerResult.panel_layout || [],
-            dataUrl: processingResults.mlServerResult.visualization,
-            metadata: {
-              segmentCount:
-                processingResults.mlServerResult.roof_segments?.length || 0,
-              obstructionCount:
-                processingResults.mlServerResult.obstructions?.length || 0,
-              panelCount:
-                processingResults.mlServerResult.panel_layout?.length || 0,
-              layoutMetadata:
-                processingResults.mlServerResult.layout_metadata || {},
-              processingTime: processingResults.mlServerResult.processing_time,
-              usingFluxData: false, // Indicate we used RGB as fallback
-            },
           });
         }
       } catch (mlError) {
@@ -1006,6 +1002,13 @@ async function processAnnualFluxLayer(
       options
     );
 
+    console.log("Layer manager result keys:", Object.keys(result));
+    console.log("Has processedData:", !!result.processedData);
+    if (result.processedData) {
+      console.log("ProcessedData keys:", Object.keys(result.processedData));
+      console.log("ProcessedData has raster:", !!result.processedData.raster);
+    }
+
     // Get dimensions from processed Annual Flux result
     const fluxWidth =
       result.processedData?.metadata?.dimensions?.width ||
@@ -1041,12 +1044,38 @@ async function processAnnualFluxLayer(
       };
     }
 
+    // CRITICAL: Try to extract raster data from the layer manager result
+    let rasterData = null;
+
+    // The layer manager should have processedData with raster
+    if (result.processedData && result.processedData.raster) {
+      rasterData = result.processedData.raster;
+      console.log(
+        `Annual Flux raster data extracted: ${rasterData.length} pixels`
+      );
+    } else {
+      console.warn(
+        "Annual Flux raster data not available from layer manager result"
+      );
+      console.log("Available result structure:", {
+        hasProcessedData: !!result.processedData,
+        processedDataKeys: result.processedData
+          ? Object.keys(result.processedData)
+          : [],
+        hasVisualization: !!result.visualization,
+        hasMetadata: !!result.metadata,
+      });
+    }
+
     // Return the processed Annual Flux data
     return {
       layerType: "annualFlux",
       bounds: result.bounds,
       buildingBoundaries: result.buildingBoundaries,
       dataUrls: dataUrls,
+      // Include raster data if available
+      raster: rasterData,
+      processedData: result.processedData, // Include full processed data for debugging
       metadata: {
         dimensions: { width: fluxWidth, height: fluxHeight },
         hasMask: !!dataLayersResponse.maskUrl,
@@ -2286,6 +2315,302 @@ function detectObstructions(
       metadata: {
         error: error.message,
       },
+    };
+  }
+}
+
+/**
+ * Create combined flux+DSM visualization using the CombinedFluxDsmVisualizer
+ * @param {Object} annualFluxResult - Processed annual flux data
+ * @param {Object} dsmResult - Processed DSM data
+ * @returns {Promise<Object>} Combined visualization result
+ */
+async function createCombinedFluxDsmVisualization(annualFluxResult, dsmResult) {
+  try {
+    console.log("Creating combined flux+DSM visualization for ML processing");
+
+    // Check if we have the raster data we need
+    if (!annualFluxResult.raster) {
+      console.error(
+        "Annual flux raster data is not available. Available keys:",
+        Object.keys(annualFluxResult)
+      );
+
+      // If we don't have raster data, we can't create the combined visualization
+      // Return a fallback that just uses the annual flux visualization
+      console.log("Falling back to using annual flux visualization only");
+
+      return {
+        dataUrls: {
+          buildingFocus: annualFluxResult.dataUrls.buildingFocus,
+          fullImage:
+            annualFluxResult.dataUrls.fullImage ||
+            annualFluxResult.dataUrls.buildingFocus,
+        },
+        enhanced: false, // Not actually enhanced since we couldn't combine
+        metadata: {
+          dimensions: annualFluxResult.metadata.dimensions,
+          fallbackMode: true,
+          reason: "Annual flux raster data not available for combination",
+        },
+        bounds: annualFluxResult.bounds,
+        buildingBoundaries: annualFluxResult.buildingBoundaries,
+      };
+    }
+
+    if (!dsmResult.raster) {
+      throw new Error("DSM raster data is not available.");
+    }
+
+    console.log("Both raster datasets available:");
+    console.log(`Flux raster: ${annualFluxResult.raster.length} pixels`);
+    console.log(`DSM raster: ${dsmResult.raster.length} pixels`);
+
+    // Create the combined visualizer instance
+    const combinedVisualizer = new CombinedFluxDsmVisualizer({
+      useEnhancedPalette: true,
+    });
+
+    // Create flux processed data object
+    const fluxProcessedData = {
+      raster: annualFluxResult.raster,
+      metadata: {
+        width: annualFluxResult.metadata.dimensions.width,
+        height: annualFluxResult.metadata.dimensions.height,
+        dimensions: annualFluxResult.metadata.dimensions,
+        dataRange: annualFluxResult.metadata.dataRange,
+      },
+      statistics: annualFluxResult.statistics,
+      bounds: annualFluxResult.bounds,
+      buildingBoundaries: annualFluxResult.buildingBoundaries,
+    };
+
+    // Create DSM processed data object
+    const dsmProcessedData = {
+      raster: dsmResult.raster,
+      metadata: {
+        width: dsmResult.metadata.dimensions.width,
+        height: dsmResult.metadata.dimensions.height,
+        dimensions: dsmResult.metadata.dimensions,
+        dataRange: dsmResult.metadata.dataRange,
+      },
+      bounds: dsmResult.bounds,
+      buildingBoundaries: dsmResult.buildingBoundaries,
+    };
+
+    console.log("Data for combined visualization:");
+    console.log(
+      `Flux: ${fluxProcessedData.metadata.width}x${fluxProcessedData.metadata.height}`
+    );
+    console.log(
+      `DSM: ${dsmProcessedData.metadata.width}x${dsmProcessedData.metadata.height}`
+    );
+
+    // Create the blended visualization
+    const blendedResult = await combinedVisualizer.createBlendedVisualization(
+      fluxProcessedData,
+      dsmProcessedData,
+      {
+        blendMode: "additive",
+        dsmInfluence: 0.35,
+        buildingFocus: true,
+        paletteName: "IRON",
+        quality: 0.95,
+      }
+    );
+
+    console.log("Combined visualization created successfully");
+
+    // Return in the format expected by the ML processing functions
+    return {
+      dataUrls: {
+        buildingFocus: blendedResult.buildingFocus,
+        fullImage: blendedResult.fullImage,
+      },
+      enhanced: blendedResult.enhanced,
+      metadata: blendedResult.metadata || {
+        dimensions: fluxProcessedData.metadata.dimensions,
+        blendMode: "additive",
+        dsmInfluence: 0.35,
+        hasDsmBlending: true,
+      },
+      bounds: fluxProcessedData.bounds,
+      buildingBoundaries: fluxProcessedData.buildingBoundaries,
+    };
+  } catch (error) {
+    console.error("Error creating combined flux+DSM visualization:", error);
+    throw new Error(
+      `Failed to create combined visualization: ${error.message}`
+    );
+  }
+}
+
+/**
+ * Helper function to extract raster data from visualization result if not directly available
+ * This is a placeholder - you may need to implement this based on your data structure
+ * @param {Object} result - Annual flux result
+ * @returns {Array} Raster data array
+ */
+function extractRasterFromVisualization(result) {
+  // If raster data is not directly available, you might need to extract it
+  // from the processed data or regenerate it. This depends on your data flow.
+
+  // For now, return null and handle in the calling function
+  console.warn("Raster data not directly available in annual flux result");
+  return null;
+}
+
+/**
+ * Process roof segmentation with ML server using Combined Flux+DSM visualization
+ * @param {Object} combinedVisualizationResult - Combined flux+DSM visualization result
+ * @param {Object} buildingInsights - Building insights data
+ * @param {Array} roofSegments - Processed roof segments (optional)
+ * @returns {Promise<Object>} ML server processing results
+ */
+async function processMlServerRoofSegmentationWithCombined(
+  combinedVisualizationResult,
+  buildingInsights,
+  roofSegments = null
+) {
+  try {
+    console.log(
+      "Processing ML server roof segmentation with Combined Flux+DSM data"
+    );
+
+    // Debug the combined result structure
+    console.log("Combined Visualization Result structure received:", {
+      hasDataUrls: !!combinedVisualizationResult.dataUrls,
+      hasMetadata: !!combinedVisualizationResult.metadata,
+      hasBuildingBoundaries: !!combinedVisualizationResult.buildingBoundaries,
+      enhanced: combinedVisualizationResult.enhanced,
+      metadataDimensions: combinedVisualizationResult.metadata?.dimensions
+        ? `${combinedVisualizationResult.metadata.dimensions.width}x${combinedVisualizationResult.metadata.dimensions.height}`
+        : "No dimensions in metadata",
+    });
+
+    // Extract building ID from building insights
+    const buildingId = buildingInsights.name || `building_${Date.now()}`;
+
+    // Get Combined Flux+DSM image data URL (building-focused)
+    const combinedImage = combinedVisualizationResult.dataUrls.buildingFocus;
+    if (!combinedImage) {
+      throw new Error(
+        "Combined Flux+DSM image data URL not available for ML processing"
+      );
+    }
+
+    // Extract dimensions from combined visualization result
+    const imageWidth = combinedVisualizationResult.metadata?.dimensions?.width;
+    const imageHeight =
+      combinedVisualizationResult.metadata?.dimensions?.height;
+
+    // Log the dimensions we're using
+    console.log(
+      `Using Combined Flux+DSM dimensions for ML processing: ${imageWidth}x${imageHeight}`
+    );
+
+    // Validate dimensions
+    if (!imageWidth || !imageHeight || imageWidth === 0 || imageHeight === 0) {
+      throw new Error(
+        `Invalid Combined Flux+DSM dimensions for ML processing: ${imageWidth}x${imageHeight}`
+      );
+    }
+
+    // Convert geocoordinates to pixel coordinates
+    const pixelCoordinates = convertGeoToPixel({
+      imgWidth: imageWidth,
+      imgHeight: imageHeight,
+      buildingBoundingBox: buildingInsights.boundingBox,
+      buildingCenter: buildingInsights.center,
+      roofSegments:
+        roofSegments || buildingInsights.solarPotential?.roofSegmentStats || [],
+    });
+
+    console.log("Converted pixel coordinates:", {
+      buildingBox: pixelCoordinates.buildingBox,
+      roofSegments: pixelCoordinates.roofSegments.length,
+    });
+
+    // Create request data for ML server (using Combined Flux+DSM image)
+    const requestData = {
+      building_id: buildingId,
+      rgb_image: combinedImage, // Using combined flux+DSM image instead of RGB
+      image_width: imageWidth,
+      image_height: imageHeight,
+      building_box: pixelCoordinates.buildingBox,
+      roof_segments: pixelCoordinates.roofSegments,
+      building_center: pixelCoordinates.buildingCenter,
+    };
+
+    // Log the request data (without image data)
+    const logData = { ...requestData };
+    if (logData.rgb_image)
+      logData.rgb_image = "[COMBINED FLUX+DSM IMAGE DATA URL]";
+
+    console.log(
+      "ML server request data (with Combined Flux+DSM):",
+      JSON.stringify(logData, null, 2)
+    );
+
+    // Send request to ML server
+    const startTime = Date.now();
+    console.log("Sending Combined Flux+DSM data to ML server...");
+    const mlResponse = await axios.post(
+      `${ML_SERVER_URL}/api/predict`,
+      requestData,
+      {
+        headers: { "Content-Type": "application/json" },
+        timeout: 600000, // 60 second timeout for ML processing
+      }
+    );
+
+    const processingTime = Date.now() - startTime;
+    console.log(`ML server response received in ${processingTime}ms`);
+
+    // Process response
+    const mlData = mlResponse.data;
+
+    // Add processing time to result
+    mlData.processing_time = processingTime;
+    mlData.success = true;
+
+    // CRITICAL: Ensure obstructions are present
+    if (!mlData.obstructions) {
+      mlData.obstructions = [];
+    }
+
+    console.log(
+      `ML server returned ${mlData.obstructions.length} obstructions using Combined Flux+DSM data`
+    );
+
+    return mlData;
+  } catch (error) {
+    console.error(
+      "Error processing with ML server using Combined Flux+DSM:",
+      error
+    );
+
+    // Capture detailed error information
+    let errorDetails = {
+      message: error.message,
+      type: error.response ? "ml_server_error" : "connection_error",
+    };
+
+    if (error.response) {
+      errorDetails.status = error.response.status;
+      errorDetails.statusText = error.response.statusText;
+      errorDetails.data = error.response.data;
+    }
+
+    console.error("Error details:", JSON.stringify(errorDetails, null, 2));
+
+    // Return error information
+    return {
+      success: false,
+      error: error.message,
+      error_type: error.response ? "ml_server_error" : "connection_error",
+      error_details: error.response?.data || {},
+      obstructions: [], // Ensure the obstructions property exists even in error case
     };
   }
 }

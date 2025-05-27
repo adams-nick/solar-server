@@ -363,8 +363,7 @@ class AnnualFluxProcessor extends Processor {
       }
 
       // Find building boundaries
-      const buildingMargin =
-        options.buildingMargin || config.visualization.BUILDING_MARGIN || 20;
+      const buildingMargin = 0;
 
       let buildingBoundaries = VisualizationUtils.findBuildingBoundaries(
         maskRaster,
