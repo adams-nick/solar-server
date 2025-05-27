@@ -94,12 +94,17 @@ class AnnualFluxProcessor extends Processor {
           );
         }
 
-        // Apply the mask to the flux data
-        let maskedFluxRaster = this.applyMask(
-          fluxRaster,
+        // IMPORTANT: Apply the mask to the flux data FIRST
+        console.log("[AnnualFluxProcessor] Applying mask to flux data");
+        let maskedFluxRaster = VisualizationUtils.applyMaskToData(
           maskRaster,
+          fluxRaster,
           width,
-          height
+          height,
+          {
+            threshold: 0,
+            nullValue: config.processing.NO_DATA_VALUE,
+          }
         );
 
         // Find valid data range
@@ -111,20 +116,93 @@ class AnnualFluxProcessor extends Processor {
           dataRange
         );
 
+        // Crop to building boundaries if requested
+        const cropEnabled = options.cropToBuilding !== false;
+        let croppedFluxRaster = maskedFluxRaster;
+        let croppedMaskRaster = maskRaster;
+        let croppedRawFluxRaster = rawFluxRaster;
+        let croppedWidth = width;
+        let croppedHeight = height;
+        let croppedBounds = bounds;
+
+        if (
+          cropEnabled &&
+          buildingBoundaries &&
+          buildingBoundaries.hasBuilding
+        ) {
+          console.log(
+            "[AnnualFluxProcessor] Cropping data to building boundaries"
+          );
+
+          // Use the centralized utility for cropping
+          const cropResult = VisualizationUtils.cropRastersToBuilding(
+            maskedFluxRaster,
+            maskRaster,
+            width,
+            height,
+            buildingBoundaries,
+            {
+              originalRaster: rawFluxRaster,
+              noDataValue: config.processing.NO_DATA_VALUE,
+            }
+          );
+
+          croppedFluxRaster = cropResult.croppedRaster;
+          croppedMaskRaster = cropResult.croppedMaskRaster;
+          croppedRawFluxRaster = cropResult.croppedOriginalRaster;
+          croppedWidth = buildingBoundaries.width;
+          croppedHeight = buildingBoundaries.height;
+
+          console.log(
+            `[AnnualFluxProcessor] Data cropped from ${width}x${height} to ${croppedWidth}x${croppedHeight}`
+          );
+
+          // Update bounds to reflect the cropped area
+          croppedBounds = VisualizationUtils.adjustBoundsToBuilding(
+            bounds,
+            width,
+            height,
+            buildingBoundaries
+          );
+
+          // Update building boundaries to be relative to the cropped image
+          buildingBoundaries =
+            VisualizationUtils.normalizeBuilding(buildingBoundaries);
+        } else {
+          console.log(
+            "[AnnualFluxProcessor] Data not cropped - using full raster"
+          );
+        }
+
         // Create the result object
         const result = {
           layerType: "annualFlux",
           metadata: {
-            dimensions: { width, height },
+            dimensions: {
+              width: croppedWidth,
+              height: croppedHeight,
+              originalWidth: width,
+              originalHeight: height,
+            },
             ...fluxMetadata,
             ...metadata,
             dataRange,
           },
-          fluxRaster: maskedFluxRaster,
-          originalFluxRaster: rawFluxRaster,
-          maskRaster,
+          // IMPORTANT: Store both cropped and uncropped versions
+          raster: croppedFluxRaster, // Masked and cropped for building focus
+          originalRaster: croppedRawFluxRaster, // Original but cropped to building
+          maskRaster: croppedMaskRaster, // Mask cropped to building
+
+          // IMPORTANT: Add the full uncropped versions
+          fullRaster: maskedFluxRaster, // Masked but not cropped
+          fullOriginalRaster: rawFluxRaster, // Original full image without masking or cropping
+          fullMaskRaster: maskRaster, // Full mask without cropping
+          fullWidth: width, // Original width
+          fullHeight: height, // Original height
+
           buildingBoundaries,
-          bounds,
+          bounds: croppedBounds,
+          fullBounds: bounds, // Original bounds
           statistics,
         };
 
@@ -258,12 +336,13 @@ class AnnualFluxProcessor extends Processor {
           `[AnnualFluxProcessor] Mask dimensions (${maskMetadata.width}x${maskMetadata.height}) don't match flux (${fluxWidth}x${fluxHeight}). Resizing...`
         );
 
-        maskRaster = this.resizeMask(
+        maskRaster = VisualizationUtils.resampleRaster(
           maskRaster,
           maskMetadata.width,
           maskMetadata.height,
           fluxWidth,
-          fluxHeight
+          fluxHeight,
+          { method: "nearest" }
         );
       }
 
@@ -377,99 +456,6 @@ class AnnualFluxProcessor extends Processor {
   }
 
   /**
-   * Apply mask to flux data
-   * @private
-   * @param {Array} fluxRaster - Flux raster data
-   * @param {Array} maskRaster - Mask raster data
-   * @param {number} width - Image width
-   * @param {number} height - Image height
-   * @returns {Array} - Masked flux data
-   */
-  applyMask(fluxRaster, maskRaster, width, height) {
-    try {
-      const maskedRaster = new Array(fluxRaster.length);
-      const noDataValue = config.processing.NO_DATA_VALUE || -9999;
-      let maskedCount = 0;
-      let validCount = 0;
-
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const idx = y * width + x;
-
-          // Check if this pixel is inside mask and has valid flux data
-          if (
-            maskRaster[idx] > 0 &&
-            fluxRaster[idx] !== noDataValue &&
-            !isNaN(fluxRaster[idx]) &&
-            isFinite(fluxRaster[idx])
-          ) {
-            maskedRaster[idx] = fluxRaster[idx];
-            validCount++;
-          } else {
-            maskedRaster[idx] = noDataValue;
-            maskedCount++;
-          }
-        }
-      }
-
-      console.log(
-        `[AnnualFluxProcessor] Masked ${maskedCount} pixels, kept ${validCount} valid pixels (${(
-          (validCount / fluxRaster.length) *
-          100
-        ).toFixed(2)}% of total)`
-      );
-
-      // Handle case with no valid data
-      if (validCount === 0) {
-        console.warn(
-          "[AnnualFluxProcessor] No valid pixels after masking, using default pattern"
-        );
-        return this.createDefaultPattern(width, height);
-      }
-
-      return maskedRaster;
-    } catch (error) {
-      console.error(
-        `[AnnualFluxProcessor] Error applying mask: ${error.message}`
-      );
-      return fluxRaster; // Return original on error
-    }
-  }
-
-  /**
-   * Create a default pattern for empty data
-   * @private
-   * @param {number} width - Width of pattern
-   * @param {number} height - Height of pattern
-   * @returns {Array} - Data with gradient pattern
-   */
-  createDefaultPattern(width, height) {
-    const pattern = new Array(width * height);
-    const centerX = Math.floor(width / 2);
-    const centerY = Math.floor(height / 2);
-    const maxDist = Math.sqrt(centerX * centerX + centerY * centerY);
-
-    // Create a radial gradient pattern
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const idx = y * width + x;
-        // Distance from center
-        const dx = x - centerX;
-        const dy = y - centerY;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-
-        // Normalized distance (0-1)
-        const normDist = dist / maxDist;
-
-        // Invert and scale to reasonable annual flux range (900-1500)
-        pattern[idx] = 1500 - normDist * 600;
-      }
-    }
-
-    return pattern;
-  }
-
-  /**
    * Count non-zero values in an array
    * @private
    * @param {Array} array - Array to check
@@ -549,62 +535,6 @@ class AnnualFluxProcessor extends Processor {
         error: error.message,
       };
     }
-  }
-
-  /**
-   * Resize mask data to match flux dimensions
-   * @private
-   * @param {Array} maskData - Original mask data
-   * @param {number} srcWidth - Source width
-   * @param {number} srcHeight - Source height
-   * @param {number} destWidth - Destination width
-   * @param {number} destHeight - Destination height
-   * @returns {Array} - Resized mask data
-   */
-  resizeMask(maskData, srcWidth, srcHeight, destWidth, destHeight) {
-    console.log(
-      `[AnnualFluxProcessor] Resizing mask from ${srcWidth}x${srcHeight} to ${destWidth}x${destHeight}`
-    );
-
-    const resizedMask = new Array(destWidth * destHeight).fill(0);
-
-    // Scaling factors
-    const scaleX = srcWidth / destWidth;
-    const scaleY = srcHeight / destHeight;
-
-    // Count non-zero values before and after
-    let srcNonZero = 0;
-    let destNonZero = 0;
-
-    // Count source non-zero values
-    for (let i = 0; i < maskData.length; i++) {
-      if (maskData[i] > 0) srcNonZero++;
-    }
-
-    // Perform resizing
-    for (let y = 0; y < destHeight; y++) {
-      for (let x = 0; x < destWidth; x++) {
-        // Find corresponding source position
-        const srcX = Math.min(Math.floor(x * scaleX), srcWidth - 1);
-        const srcY = Math.min(Math.floor(y * scaleY), srcHeight - 1);
-
-        const srcIdx = srcY * srcWidth + srcX;
-        const destIdx = y * destWidth + x;
-
-        // Copy value if source index is valid
-        if (srcIdx >= 0 && srcIdx < maskData.length) {
-          resizedMask[destIdx] = maskData[srcIdx];
-
-          if (maskData[srcIdx] > 0) destNonZero++;
-        }
-      }
-    }
-
-    console.log(
-      `[AnnualFluxProcessor] Mask resize: source had ${srcNonZero} non-zero pixels, destination has ${destNonZero} non-zero pixels`
-    );
-
-    return resizedMask;
   }
 
   /**

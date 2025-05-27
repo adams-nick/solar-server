@@ -18,6 +18,8 @@ const RoofSegmentVisualizer = require("../../data-layers/layers/roof-segments/ro
 const {
   VisualizationUtils,
 } = require("../../data-layers/utils/visualization-utils");
+// Import solar panel analysis module
+const solarPanelAnalysis = require("../../utils/solarPanelAnalysis");
 // TODO const config = require("../../config");
 
 // ML server URL - should be configurable via environment variable
@@ -190,6 +192,7 @@ async function processComprehensiveAnalysis(res, session) {
     buildingInsights: null,
     rgbResult: null,
     dsmResult: null,
+    annualFluxResult: null, // New: Annual flux processing result
     roofSegmentsResult: null,
     mlServerResult: null,
     dataLayersResponse: null,
@@ -241,13 +244,14 @@ async function processComprehensiveAnalysis(res, session) {
         hasRgbUrl: !!processingResults.dataLayersResponse.rgbUrl,
         hasDsmUrl: !!processingResults.dataLayersResponse.dsmUrl,
         hasMaskUrl: !!processingResults.dataLayersResponse.maskUrl,
+        hasAnnualFluxUrl: !!processingResults.dataLayersResponse.annualFluxUrl, // Check for annual flux
         imageryQuality: processingResults.dataLayersResponse.imageryQuality,
       });
 
       // Process RGB image if available
       if (processingResults.dataLayersResponse.rgbUrl) {
         sendSSEEvent(res, "progress", {
-          progress: 35,
+          progress: 32,
           message: "Processing RGB imagery...",
         });
 
@@ -279,7 +283,7 @@ async function processComprehensiveAnalysis(res, session) {
 
           // Send RGB visualization to client
           sendSSEEvent(res, "visualization", {
-            progress: 40,
+            progress: 35,
             type: "rgb",
             // Include the processed dataUrls with both views
             dataUrls: processingResults.rgbResult.dataUrls,
@@ -300,7 +304,7 @@ async function processComprehensiveAnalysis(res, session) {
             rgbError
           );
           sendSSEEvent(res, "progress", {
-            progress: 40,
+            progress: 35,
             message:
               "RGB imagery processing failed, continuing with analysis...",
             error: rgbError.message,
@@ -311,7 +315,7 @@ async function processComprehensiveAnalysis(res, session) {
       // Process DSM data if available
       if (processingResults.dataLayersResponse.dsmUrl) {
         sendSSEEvent(res, "progress", {
-          progress: 45,
+          progress: 38,
           message: "Processing DSM data...",
         });
 
@@ -335,9 +339,61 @@ async function processComprehensiveAnalysis(res, session) {
             dsmError
           );
           sendSSEEvent(res, "progress", {
-            progress: 45,
+            progress: 38,
             message: "DSM data processing failed, continuing with analysis...",
             error: dsmError.message,
+          });
+        }
+      }
+
+      // NEW: Process Annual Flux data if available
+      if (processingResults.dataLayersResponse.annualFluxUrl) {
+        sendSSEEvent(res, "progress", {
+          progress: 42,
+          message: "Processing annual solar flux data...",
+        });
+
+        try {
+          // Process the annual flux layer
+          processingResults.annualFluxResult = await processAnnualFluxLayer(
+            location,
+            processingResults.dataLayersResponse,
+            processingResults.rgbResult
+          );
+
+          console.log(
+            "Annual flux processing complete. Dimensions:",
+            processingResults.annualFluxResult.metadata?.dimensions?.width +
+              "x" +
+              processingResults.annualFluxResult.metadata?.dimensions?.height
+          );
+
+          // Send annual flux visualization to client
+          sendSSEEvent(res, "visualization", {
+            progress: 45,
+            type: "annualFlux",
+            dataUrls: processingResults.annualFluxResult.dataUrls,
+            metadata: {
+              imageryDate: processingResults.dataLayersResponse.imageryDate,
+              imageryQuality:
+                processingResults.dataLayersResponse.imageryQuality,
+              dimensions:
+                processingResults.annualFluxResult.metadata?.dimensions,
+              dataRange: processingResults.annualFluxResult.metadata?.dataRange,
+              statistics: processingResults.annualFluxResult.statistics,
+            },
+            bounds: processingResults.annualFluxResult.bounds,
+          });
+        } catch (annualFluxError) {
+          console.error(
+            `Error processing annual flux layer for analysis ${analysisId}:`,
+            annualFluxError
+          );
+          sendSSEEvent(res, "progress", {
+            progress: 45,
+            message:
+              "Annual flux data processing failed, continuing with analysis...",
+            error: annualFluxError.message,
           });
         }
       }
@@ -347,7 +403,7 @@ async function processComprehensiveAnalysis(res, session) {
         error
       );
       sendSSEEvent(res, "progress", {
-        progress: 40,
+        progress: 45,
         message: "Data layers unavailable, continuing with roof segments...",
         error: error.message,
       });
@@ -402,15 +458,160 @@ async function processComprehensiveAnalysis(res, session) {
       }
     }
 
-    // Step 5: Process ML server roof segmentation (if RGB data and building insights available)
-    if (processingResults.rgbResult && processingResults.buildingInsights) {
+    // Step 5: Process ML server roof segmentation (UPDATED to use annual flux instead of RGB)
+    if (
+      processingResults.annualFluxResult &&
+      processingResults.buildingInsights
+    ) {
       sendSSEEvent(res, "progress", {
         progress: 70,
-        message: "Processing advanced roof segmentation with ML...",
+        message:
+          "Processing advanced roof segmentation with ML using solar flux data...",
       });
 
       try {
-        // Process with ML server
+        // Process with ML server using annual flux instead of RGB
+        processingResults.mlServerResult =
+          await processMlServerRoofSegmentationWithFlux(
+            processingResults.annualFluxResult, // Use annual flux instead of RGB
+            processingResults.buildingInsights,
+            processingResults.roofSegmentsResult?.data
+          );
+
+        // If we have ML results, generate solar panel layout and obstructions
+        if (
+          processingResults.mlServerResult &&
+          processingResults.mlServerResult.success
+        ) {
+          sendSSEEvent(res, "progress", {
+            progress: 75,
+            message: "Detecting obstructions and generating panel layout...",
+          });
+
+          try {
+            // Calculate real-world dimensions for the image
+            const realWorldDimensions = calculateRealWorldDimensions(
+              processingResults.annualFluxResult, // Use annual flux dimensions
+              processingResults.buildingInsights
+            );
+
+            // Generate obstructions using 0.5m dimensions (optimized from original approach)
+            const obstructionResult = detectObstructions(
+              processingResults.mlServerResult.roof_segments || [],
+              processingResults.dsmResult,
+              realWorldDimensions,
+              processingResults.roofSegmentsResult?.data || []
+            );
+
+            // Make sure obstructions are properly preserved in the ML server result
+            if (!processingResults.mlServerResult.obstructions) {
+              processingResults.mlServerResult.obstructions = [];
+            }
+
+            // Store detailed obstructions
+            processingResults.mlServerResult.obstructions =
+              obstructionResult.obstructions;
+            console.log(
+              `Detected ${obstructionResult.obstructions.length} obstructions`
+            );
+
+            // Now generate optimal panel layout using the solarPanelAnalysis module
+            const optimalLayoutResult =
+              solarPanelAnalysis.generateOptimalPanelLayout(
+                processingResults.mlServerResult.roof_segments || [],
+                obstructionResult.obstructions || [], // Use the obstructions we detected
+                realWorldDimensions,
+                processingResults.dsmResult
+              );
+
+            // Add optimal panel layout to ML result
+            processingResults.mlServerResult.panel_layout =
+              optimalLayoutResult.panelLayout;
+            processingResults.mlServerResult.layout_metadata =
+              optimalLayoutResult.metadata;
+
+            console.log(
+              `Generated optimal panel layout with ${optimalLayoutResult.panelLayout.length} panels`
+            );
+          } catch (layoutError) {
+            console.error(
+              `Error detecting obstructions and generating panel layout: ${layoutError.message}`
+            );
+            sendSSEEvent(res, "progress", {
+              progress: 75,
+              message:
+                "Obstruction detection and panel layout generation failed, continuing with analysis...",
+              error: layoutError.message,
+            });
+          }
+        }
+
+        // Send ML server results to client
+        // CRITICAL: Ensuring obstructions are preserved
+        if (
+          processingResults.mlServerResult &&
+          processingResults.mlServerResult.success
+        ) {
+          // Log the obstructions data for debugging
+          console.log(
+            `Found ${
+              processingResults.mlServerResult.obstructions?.length || 0
+            } obstructions in ML result`
+          );
+
+          sendSSEEvent(res, "visualization", {
+            progress: 80,
+            type: "mlRoofSegments",
+            segments: processingResults.mlServerResult.roof_segments || [],
+            obstructions: processingResults.mlServerResult.obstructions || [],
+            panelLayout: processingResults.mlServerResult.panel_layout || [],
+            dataUrl: processingResults.mlServerResult.visualization,
+            metadata: {
+              segmentCount:
+                processingResults.mlServerResult.roof_segments?.length || 0,
+              obstructionCount:
+                processingResults.mlServerResult.obstructions?.length || 0,
+              panelCount:
+                processingResults.mlServerResult.panel_layout?.length || 0,
+              layoutMetadata:
+                processingResults.mlServerResult.layout_metadata || {},
+              processingTime: processingResults.mlServerResult.processing_time,
+              usingFluxData: true, // Indicate we used flux data instead of RGB
+            },
+          });
+        } else {
+          sendSSEEvent(res, "progress", {
+            progress: 80,
+            message: "ML roof segmentation completed with issues.",
+            error:
+              processingResults.mlServerResult?.error ||
+              "Unknown ML processing error",
+          });
+        }
+      } catch (mlError) {
+        console.error(
+          `Error processing ML server roof segmentation for analysis ${analysisId}:`,
+          mlError
+        );
+        sendSSEEvent(res, "progress", {
+          progress: 80,
+          message: "ML roof segmentation failed, continuing with analysis...",
+          error: mlError.message,
+        });
+      }
+    } else if (
+      processingResults.rgbResult &&
+      processingResults.buildingInsights
+    ) {
+      // Fallback to RGB if annual flux is not available
+      sendSSEEvent(res, "progress", {
+        progress: 70,
+        message:
+          "Processing advanced roof segmentation with ML using RGB data (fallback)...",
+      });
+
+      try {
+        // Process with ML server using RGB as fallback
         processingResults.mlServerResult =
           await processMlServerRoofSegmentation(
             processingResults.rgbResult,
@@ -418,58 +619,63 @@ async function processComprehensiveAnalysis(res, session) {
             processingResults.roofSegmentsResult?.data
           );
 
-        // If we have both ML results and DSM data, generate solar panel layout
+        // Continue with the same obstruction detection and panel layout logic...
+        // (Same as above but using RGB result instead of annual flux result)
         if (
           processingResults.mlServerResult &&
-          processingResults.mlServerResult.success &&
-          processingResults.dsmResult &&
-          processingResults.dsmResult.raster
+          processingResults.mlServerResult.success
         ) {
           sendSSEEvent(res, "progress", {
             progress: 75,
-            message: "Generating solar panel layout...",
+            message: "Detecting obstructions and generating panel layout...",
           });
 
           try {
-            // Calculate real-world dimensions for the image
             const realWorldDimensions = calculateRealWorldDimensions(
               processingResults.rgbResult,
               processingResults.buildingInsights
             );
 
-            // Generate solar panel layout
-            const panelLayoutResult = generateSolarPanelLayout(
+            const obstructionResult = detectObstructions(
               processingResults.mlServerResult.roof_segments || [],
               processingResults.dsmResult,
               realWorldDimensions,
               processingResults.roofSegmentsResult?.data || []
             );
 
-            // Add panel layout to ML result
-            processingResults.mlServerResult.panel_layout =
-              panelLayoutResult.panelLayout;
-            processingResults.mlServerResult.obstructions =
-              panelLayoutResult.obstructions;
-            processingResults.mlServerResult.layout_metadata =
-              panelLayoutResult.metadata;
+            if (!processingResults.mlServerResult.obstructions) {
+              processingResults.mlServerResult.obstructions = [];
+            }
 
-            console.log(
-              `Generated solar panel layout with ${panelLayoutResult.panelLayout.length} panels and ${panelLayoutResult.obstructions.length} obstructions`
-            );
+            processingResults.mlServerResult.obstructions =
+              obstructionResult.obstructions;
+
+            const optimalLayoutResult =
+              solarPanelAnalysis.generateOptimalPanelLayout(
+                processingResults.mlServerResult.roof_segments || [],
+                obstructionResult.obstructions || [],
+                realWorldDimensions,
+                processingResults.dsmResult
+              );
+
+            processingResults.mlServerResult.panel_layout =
+              optimalLayoutResult.panelLayout;
+            processingResults.mlServerResult.layout_metadata =
+              optimalLayoutResult.metadata;
           } catch (layoutError) {
             console.error(
-              `Error generating solar panel layout: ${layoutError.message}`
+              `Error detecting obstructions and generating panel layout: ${layoutError.message}`
             );
             sendSSEEvent(res, "progress", {
               progress: 75,
               message:
-                "Solar panel layout generation failed, continuing with analysis...",
+                "Obstruction detection and panel layout generation failed, continuing with analysis...",
               error: layoutError.message,
             });
           }
         }
 
-        // Send ML server results to client
+        // Send results with RGB fallback indicator
         if (
           processingResults.mlServerResult &&
           processingResults.mlServerResult.success
@@ -491,15 +697,8 @@ async function processComprehensiveAnalysis(res, session) {
               layoutMetadata:
                 processingResults.mlServerResult.layout_metadata || {},
               processingTime: processingResults.mlServerResult.processing_time,
+              usingFluxData: false, // Indicate we used RGB as fallback
             },
-          });
-        } else {
-          sendSSEEvent(res, "progress", {
-            progress: 80,
-            message: "ML roof segmentation completed with issues.",
-            error:
-              processingResults.mlServerResult?.error ||
-              "Unknown ML processing error",
           });
         }
       } catch (mlError) {
@@ -758,6 +957,111 @@ async function processRgbLayer(location, dataLayersResponse) {
 }
 
 /**
+ * NEW: Process Annual Flux layer using the layer manager
+ * @param {Object} location - Location object with latitude and longitude
+ * @param {Object} dataLayersResponse - Response from the data layers API
+ * @param {Object} rgbResults - Processed RGB data to match dimensions (optional)
+ * @returns {Promise<Object>} Processed Annual Flux layer data
+ */
+async function processAnnualFluxLayer(
+  location,
+  dataLayersResponse,
+  rgbResults = null
+) {
+  try {
+    console.log(
+      `Processing Annual Flux layer for location: ${location.latitude}, ${location.longitude}`
+    );
+
+    if (!dataLayersResponse.annualFluxUrl) {
+      throw new Error("Annual Flux URL not available in data layers response");
+    }
+
+    // Create processing options
+    const radius = 50; // Default radius, adjust as needed
+    const options = {
+      radius,
+      layerUrl: dataLayersResponse.annualFluxUrl,
+      maskUrl: dataLayersResponse.maskUrl,
+      buildingFocus: true,
+      cropToBuilding: true, // Ensure we crop to the building boundary
+      fallbackToSynthetic: false,
+    };
+
+    console.log(
+      "Calling layer manager to process Annual Flux layer with options:",
+      {
+        ...options,
+        layerUrl: options.layerUrl
+          ? "[Annual Flux URL present]"
+          : "[No Annual Flux URL]",
+        maskUrl: options.maskUrl ? "[Mask URL present]" : "[No Mask URL]",
+      }
+    );
+
+    // Process Annual Flux using the layer manager
+    const result = await layerManager.processLayer(
+      "annualFlux",
+      location,
+      options
+    );
+
+    // Get dimensions from processed Annual Flux result
+    const fluxWidth =
+      result.processedData?.metadata?.dimensions?.width ||
+      result.metadata?.dimensions?.width ||
+      0;
+    const fluxHeight =
+      result.processedData?.metadata?.dimensions?.height ||
+      result.metadata?.dimensions?.height ||
+      0;
+
+    console.log(
+      `Annual Flux processing dimensions: ${fluxWidth}x${fluxHeight}`
+    );
+
+    // Extract the visualization data
+    let dataUrls = {};
+
+    // Check if the visualization is already in the expected format with both views
+    if (
+      typeof result.visualization === "object" &&
+      (result.visualization.buildingFocus || result.visualization.fullImage)
+    ) {
+      // It's already in the right format
+      dataUrls = {
+        buildingFocus: result.visualization.buildingFocus,
+        fullImage: result.visualization.fullImage,
+      };
+    } else {
+      // It's just a single data URL - use it for both views
+      dataUrls = {
+        buildingFocus: result.visualization,
+        fullImage: result.visualization,
+      };
+    }
+
+    // Return the processed Annual Flux data
+    return {
+      layerType: "annualFlux",
+      bounds: result.bounds,
+      buildingBoundaries: result.buildingBoundaries,
+      dataUrls: dataUrls,
+      metadata: {
+        dimensions: { width: fluxWidth, height: fluxHeight },
+        hasMask: !!dataLayersResponse.maskUrl,
+        dataRange: result.processedData?.metadata?.dataRange ||
+          result.metadata?.dataRange || { min: 0, max: 1800 },
+      },
+      statistics: result.processedData?.statistics || null,
+    };
+  } catch (error) {
+    console.error("Error processing Annual Flux layer:", error);
+    throw new Error(`Failed to process Annual Flux data: ${error.message}`);
+  }
+}
+
+/**
  * Process DSM layer using the layer manager
  * @param {Object} location - Location object with latitude and longitude
  * @param {Object} dataLayersResponse - Response from the data layers API
@@ -898,8 +1202,12 @@ async function processRoofSegments(buildingInsightsData) {
 
     // Filter out segments that are too small to hold at least one panel
     const solarPotential = buildingInsightsData.solarPotential;
-    const panelWidth = solarPotential.panelWidthMeters || 1.045;
-    const panelHeight = solarPotential.panelHeightMeters || 1.879;
+    const panelWidth =
+      solarPotential.panelWidthMeters ||
+      solarPanelAnalysis.STANDARD_PANEL_WIDTH;
+    const panelHeight =
+      solarPotential.panelHeightMeters ||
+      solarPanelAnalysis.STANDARD_PANEL_HEIGHT;
     const minPanelArea = panelWidth * panelHeight;
 
     // Add some margin for installation constraints
@@ -990,7 +1298,7 @@ async function processRoofSegments(buildingInsightsData) {
 }
 
 /**
- * Process roof segmentation with ML server
+ * Process roof segmentation with ML server (original RGB version)
  * @param {Object} rgbResult - Processed RGB data
  * @param {Object} buildingInsights - Building insights data
  * @param {Array} roofSegments - Processed roof segments (optional)
@@ -1002,7 +1310,7 @@ async function processMlServerRoofSegmentation(
   roofSegments = null
 ) {
   try {
-    console.log("Processing ML server roof segmentation");
+    console.log("Processing ML server roof segmentation with RGB data");
 
     // Debug the rgbResult object thoroughly
     console.log("RGB Result structure received:", {
@@ -1095,6 +1403,15 @@ async function processMlServerRoofSegmentation(
     mlData.processing_time = processingTime;
     mlData.success = true;
 
+    // CRITICAL: Ensure obstructions are present
+    if (!mlData.obstructions) {
+      mlData.obstructions = [];
+    }
+
+    console.log(
+      `ML server returned ${mlData.obstructions.length} obstructions`
+    );
+
     return mlData;
   } catch (error) {
     console.error("Error processing with ML server:", error);
@@ -1119,6 +1436,156 @@ async function processMlServerRoofSegmentation(
       error: error.message,
       error_type: error.response ? "ml_server_error" : "connection_error",
       error_details: error.response?.data || {},
+      obstructions: [], // Ensure the obstructions property exists even in error case
+    };
+  }
+}
+
+/**
+ * NEW: Process roof segmentation with ML server using Annual Flux data
+ * @param {Object} annualFluxResult - Processed Annual Flux data
+ * @param {Object} buildingInsights - Building insights data
+ * @param {Array} roofSegments - Processed roof segments (optional)
+ * @returns {Promise<Object>} ML server processing results
+ */
+async function processMlServerRoofSegmentationWithFlux(
+  annualFluxResult,
+  buildingInsights,
+  roofSegments = null
+) {
+  try {
+    console.log("Processing ML server roof segmentation with Annual Flux data");
+
+    // Debug the annualFluxResult object thoroughly
+    console.log("Annual Flux Result structure received:", {
+      hasDataUrls: !!annualFluxResult.dataUrls,
+      hasMetadata: !!annualFluxResult.metadata,
+      hasBuildingBoundaries: !!annualFluxResult.buildingBoundaries,
+      metadataDimensions: annualFluxResult.metadata?.dimensions
+        ? `${annualFluxResult.metadata.dimensions.width}x${annualFluxResult.metadata.dimensions.height}`
+        : "No dimensions in metadata",
+      fullMetadata: JSON.stringify(annualFluxResult.metadata || {}, null, 2),
+    });
+
+    // Extract building ID from building insights
+    const buildingId = buildingInsights.name || `building_${Date.now()}`;
+
+    // Get Annual Flux image data URL (building-focused)
+    const annualFluxImage = annualFluxResult.dataUrls.buildingFocus;
+    if (!annualFluxImage) {
+      throw new Error(
+        "Annual Flux image data URL not available for ML processing"
+      );
+    }
+
+    // Extract dimensions directly from Annual Flux result
+    // Make sure to get the cropped dimensions that were actually used
+    const imageWidth = annualFluxResult.metadata?.dimensions?.width;
+    const imageHeight = annualFluxResult.metadata?.dimensions?.height;
+
+    // Log the dimensions we're using
+    console.log(
+      `Using Annual Flux dimensions for ML processing: ${imageWidth}x${imageHeight}`
+    );
+
+    // Validate dimensions
+    if (!imageWidth || !imageHeight || imageWidth === 0 || imageHeight === 0) {
+      throw new Error(
+        `Invalid Annual Flux dimensions for ML processing: ${imageWidth}x${imageHeight}`
+      );
+    }
+
+    // Convert geocoordinates to pixel coordinates
+    const pixelCoordinates = convertGeoToPixel({
+      imgWidth: imageWidth,
+      imgHeight: imageHeight,
+      buildingBoundingBox: buildingInsights.boundingBox,
+      buildingCenter: buildingInsights.center,
+      roofSegments:
+        roofSegments || buildingInsights.solarPotential?.roofSegmentStats || [],
+    });
+
+    console.log("Converted pixel coordinates:", {
+      buildingBox: pixelCoordinates.buildingBox,
+      roofSegments: pixelCoordinates.roofSegments.length,
+    });
+
+    // Create request data for ML server (using Annual Flux image instead of RGB)
+    const requestData = {
+      building_id: buildingId,
+      rgb_image: annualFluxImage, // UPDATED: Using Annual Flux image instead of RGB
+      image_width: imageWidth,
+      image_height: imageHeight,
+      building_box: pixelCoordinates.buildingBox,
+      roof_segments: pixelCoordinates.roofSegments,
+      building_center: pixelCoordinates.buildingCenter,
+    };
+
+    // Log the request data (without image data)
+    const logData = { ...requestData };
+    if (logData.rgb_image) logData.rgb_image = "[ANNUAL FLUX IMAGE DATA URL]";
+
+    console.log(
+      "ML server request data (with Annual Flux):",
+      JSON.stringify(logData, null, 2)
+    );
+
+    // Send request to ML server
+    const startTime = Date.now();
+    console.log("Sending Annual Flux data to ML server...");
+    const mlResponse = await axios.post(
+      `${ML_SERVER_URL}/api/predict`,
+      requestData,
+      {
+        headers: { "Content-Type": "application/json" },
+        timeout: 600000, // 60 second timeout for ML processing
+      }
+    );
+
+    const processingTime = Date.now() - startTime;
+    console.log(`ML server response received in ${processingTime}ms`);
+
+    // Process response
+    const mlData = mlResponse.data;
+
+    // Add processing time to result
+    mlData.processing_time = processingTime;
+    mlData.success = true;
+
+    // CRITICAL: Ensure obstructions are present
+    if (!mlData.obstructions) {
+      mlData.obstructions = [];
+    }
+
+    console.log(
+      `ML server returned ${mlData.obstructions.length} obstructions using Annual Flux data`
+    );
+
+    return mlData;
+  } catch (error) {
+    console.error("Error processing with ML server using Annual Flux:", error);
+
+    // Capture detailed error information
+    let errorDetails = {
+      message: error.message,
+      type: error.response ? "ml_server_error" : "connection_error",
+    };
+
+    if (error.response) {
+      errorDetails.status = error.response.status;
+      errorDetails.statusText = error.response.statusText;
+      errorDetails.data = error.response.data;
+    }
+
+    console.error("Error details:", JSON.stringify(errorDetails, null, 2));
+
+    // Return error information
+    return {
+      success: false,
+      error: error.message,
+      error_type: error.response ? "ml_server_error" : "connection_error",
+      error_details: error.response?.data || {},
+      obstructions: [], // Ensure the obstructions property exists even in error case
     };
   }
 }
@@ -1306,15 +1773,15 @@ function convertGeoToPixel(params) {
 
 /**
  * Calculate real-world dimensions from the image and building data
- * @param {Object} rgbResult - Processed RGB data
+ * @param {Object} imageResult - Processed image data (RGB or Annual Flux)
  * @param {Object} buildingInsights - Building insights data
  * @returns {Object} - Real-world dimensions in meters
  */
-function calculateRealWorldDimensions(rgbResult, buildingInsights) {
+function calculateRealWorldDimensions(imageResult, buildingInsights) {
   try {
     // Extract pixel dimensions
-    const pixelWidth = rgbResult.metadata?.dimensions?.width || 0;
-    const pixelHeight = rgbResult.metadata?.dimensions?.height || 0;
+    const pixelWidth = imageResult.metadata?.dimensions?.width || 0;
+    const pixelHeight = imageResult.metadata?.dimensions?.height || 0;
 
     if (pixelWidth === 0 || pixelHeight === 0) {
       throw new Error("Invalid pixel dimensions");
@@ -1644,44 +2111,44 @@ function checkBlockSlope(
 }
 
 /**
- * Generate solar panel layout based on roof polygons and DSM data
+ * Detect obstructions using roof polygons and DSM data
+ * Uses a smaller grid size (0.5m) than the solar panel layout for more detailed obstruction detection
  * @param {Array} roofSegments - Roof segments from ML server
  * @param {Object} dsmData - Processed DSM data
  * @param {Object} realWorldDimensions - Real-world dimensions
  * @param {Array} originalRoofSegments - Original roof segments with metadata
- * @returns {Object} - Solar panel layout and obstructions
+ * @returns {Object} - Detailed obstructions
  */
-function generateSolarPanelLayout(
+function detectObstructions(
   roofSegments,
   dsmData,
   realWorldDimensions,
   originalRoofSegments
 ) {
   try {
-    console.log("Generating solar panel layout");
+    console.log("Detecting roof obstructions with 0.5m resolution");
 
-    // Define panel dimensions (standard solar panel)
-    const panelWidth = 0.9; // meters
-    const panelHeight = 0.9; // meters
+    // Use 0.5m dimension for obstruction detection (finer than panel layout)
+    const obstructionWidth = 0.5; // meters
+    const obstructionHeight = 0.5; // meters
 
     // Convert to pixels
-    const panelWidthPx = Math.round(
-      panelWidth / realWorldDimensions.metersPerPixelX
+    const obstructionWidthPx = Math.round(
+      obstructionWidth / realWorldDimensions.metersPerPixelX
     );
-    const panelHeightPx = Math.round(
-      panelHeight / realWorldDimensions.metersPerPixelY
+    const obstructionHeightPx = Math.round(
+      obstructionHeight / realWorldDimensions.metersPerPixelY
     );
 
     console.log(
-      `Panel dimensions in pixels: ${panelWidthPx}px x ${panelHeightPx}px`
+      `Obstruction detection dimensions in pixels: ${obstructionWidthPx}px x ${obstructionHeightPx}px`
     );
 
-    // Arrays to store results
-    const panelLayout = [];
+    // Array to store results
     const obstructions = [];
 
     // Maximum slope deviation in degrees (for local variance)
-    const MAX_SLOPE_DEVIATION = 15;
+    const MAX_SLOPE_DEVIATION = 19; // Stricter than panel layout to catch more obstructions
 
     // Process each roof segment
     for (let i = 0; i < roofSegments.length; i++) {
@@ -1693,7 +2160,7 @@ function generateSolarPanelLayout(
         continue;
       }
 
-      console.log(`Processing segment ${segment.id} with area ${segment.area}`);
+      console.log(`Processing segment ${segment.id} for obstructions`);
 
       // Find matching original segment for metadata
       const origSegment = originalRoofSegments.find(
@@ -1705,10 +2172,6 @@ function generateSolarPanelLayout(
       // Extract metadata from original segment
       const segmentPitch = origSegment?.pitch || segment.pitch || 20; // Default 20 degree pitch
       const segmentAzimuth = origSegment?.azimuth || segment.azimuth || 180; // Default south-facing
-
-      console.log(
-        `Segment metadata - Pitch: ${segmentPitch}°, Azimuth: ${segmentAzimuth}°`
-      );
 
       // Calculate baseline slope using segment pitch
       const baselineSlope = Math.tan((segmentPitch * Math.PI) / 180);
@@ -1722,20 +2185,24 @@ function generateSolarPanelLayout(
       bounds.maxX = Math.min(realWorldDimensions.pixelWidth - 1, bounds.maxX);
       bounds.maxY = Math.min(realWorldDimensions.pixelHeight - 1, bounds.maxY);
 
-      // Iterate through bounds in panel-sized blocks
+      // Iterate through bounds in obstruction-sized blocks - use a smaller stride for more detailed detection
+      // Use 25% stride for finer detection with overlap
+      const strideX = Math.max(1, Math.floor(obstructionWidthPx * 0.25));
+      const strideY = Math.max(1, Math.floor(obstructionHeightPx * 0.25));
+
       for (
         let y = bounds.minY;
-        y <= bounds.maxY - panelHeightPx;
-        y += panelHeightPx
+        y <= bounds.maxY - obstructionHeightPx;
+        y += strideY
       ) {
         for (
           let x = bounds.minX;
-          x <= bounds.maxX - panelWidthPx;
-          x += panelWidthPx
+          x <= bounds.maxX - obstructionWidthPx;
+          x += strideX
         ) {
           // Check if the center of this block is inside the polygon
-          const centerX = x + Math.floor(panelWidthPx / 2);
-          const centerY = y + Math.floor(panelHeightPx / 2);
+          const centerX = x + Math.floor(obstructionWidthPx / 2);
+          const centerY = y + Math.floor(obstructionHeightPx / 2);
 
           if (isPointInPolygon(centerX, centerY, segment.polygon)) {
             // Block is inside the polygon - check slope consistency
@@ -1744,48 +2211,52 @@ function generateSolarPanelLayout(
                 dsmData.raster,
                 x,
                 y,
-                panelWidthPx,
-                panelHeightPx,
+                obstructionWidthPx,
+                obstructionHeightPx,
                 realWorldDimensions,
                 baselineSlope,
                 MAX_SLOPE_DEVIATION
               );
 
-            if (isValid) {
-              // Add panel to layout
-              panelLayout.push({
-                id: `panel_${segment.id}_${panelLayout.length}`,
-                segmentId: segment.id,
-                x,
-                y,
-                width: panelWidthPx,
-                height: panelHeightPx,
-                realWidth: panelWidth,
-                realHeight: panelHeight,
-                pitch: segmentPitch,
-                azimuth: segmentAzimuth,
-                slope: avgSlope,
-                // Add polygon representation for panels
-                polygon: rectangleToPolygon(x, y, panelWidthPx, panelHeightPx),
+            if (!isValid) {
+              // Only add if it's an actual obstruction - avoid duplicating nearby detections
+              // Check if we already have a similar obstruction nearby
+              const isNearExisting = obstructions.some((obs) => {
+                const distance = Math.sqrt(
+                  Math.pow(obs.x - x, 2) + Math.pow(obs.y - y, 2)
+                );
+                return (
+                  distance < obstructionWidthPx && obs.segmentId === segment.id
+                );
               });
-            } else {
-              // Add obstruction with polygon representation
-              obstructions.push({
-                id: `obstruction_${segment.id}_${obstructions.length}`,
-                segmentId: segment.id,
-                x,
-                y,
-                width: panelWidthPx,
-                height: panelHeightPx,
-                type:
-                  type === "local_variance"
-                    ? "slope_variance"
-                    : "slope_mismatch",
-                localDeviation,
-                globalDeviation,
-                // Add polygon representation for obstructions
-                polygon: rectangleToPolygon(x, y, panelWidthPx, panelHeightPx),
-              });
+
+              if (!isNearExisting) {
+                // Add obstruction with polygon representation
+                obstructions.push({
+                  id: `obstruction_${segment.id}_${obstructions.length}`,
+                  segmentId: segment.id,
+                  x,
+                  y,
+                  width: obstructionWidthPx,
+                  height: obstructionHeightPx,
+                  type:
+                    type === "local_variance"
+                      ? "slope_variance"
+                      : "slope_mismatch",
+                  localDeviation,
+                  globalDeviation,
+                  // Add polygon representation for obstructions
+                  polygon: rectangleToPolygon(
+                    x,
+                    y,
+                    obstructionWidthPx,
+                    obstructionHeightPx
+                  ),
+                  // Add real-world dimensions
+                  realWidth: obstructionWidth,
+                  realHeight: obstructionHeight,
+                });
+              }
             }
           }
         }
@@ -1793,35 +2264,24 @@ function generateSolarPanelLayout(
     }
 
     console.log(
-      `Generated layout with ${panelLayout.length} panels and ${obstructions.length} obstructions`
+      `Detected ${obstructions.length} obstructions using 0.5m resolution`
     );
 
-    // Calculate total potential energy output
-    const totalArea = panelLayout.length * panelWidth * panelHeight;
-    const avgEfficiency = 0.2; // 20% panel efficiency
-    const avgIrradiance = 1000; // W/m² (standard test condition)
-    const totalPotentialKw = (totalArea * avgEfficiency * avgIrradiance) / 1000;
-
     return {
-      panelLayout,
       obstructions,
       metadata: {
-        panelCount: panelLayout.length,
         obstructionCount: obstructions.length,
-        totalArea: totalArea,
-        potentialKw: totalPotentialKw,
-        panelDimensions: {
-          width: panelWidth,
-          height: panelHeight,
-          widthPx: panelWidthPx,
-          heightPx: panelHeightPx,
+        obstructionDimensions: {
+          width: obstructionWidth,
+          height: obstructionHeight,
+          widthPx: obstructionWidthPx,
+          heightPx: obstructionHeightPx,
         },
       },
     };
   } catch (error) {
-    console.error(`Error generating solar panel layout: ${error.message}`);
+    console.error(`Error detecting obstructions: ${error.message}`);
     return {
-      panelLayout: [],
       obstructions: [],
       metadata: {
         error: error.message,
