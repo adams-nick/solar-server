@@ -30,12 +30,35 @@ class AnnualFluxProcessor extends Processor {
    * Process raw annual flux data
    * @param {Object|Buffer} rawData - The raw data from fetcher
    * @param {Object} options - Processing options
+   * @param {Object} [options.targetLocation] - REQUIRED: Target location {latitude, longitude} for building detection
    * @returns {Promise<Object>} - Processed annual flux data
    */
   async process(rawData, options = {}) {
     try {
       return await this.timeOperation("process", async () => {
         console.log("[AnnualFluxProcessor] Processing annual flux data");
+
+        // Validate target location for building detection
+        if (!options.targetLocation) {
+          throw new Error(
+            "[AnnualFluxProcessor] targetLocation is required for building boundary detection. " +
+              "This should be provided by the LayerManager."
+          );
+        }
+
+        if (
+          !options.targetLocation.latitude ||
+          !options.targetLocation.longitude
+        ) {
+          throw new Error(
+            "[AnnualFluxProcessor] targetLocation must have latitude and longitude properties. " +
+              `Received: ${JSON.stringify(options.targetLocation)}`
+          );
+        }
+
+        console.log(
+          `[AnnualFluxProcessor] Using target location for building detection: ${options.targetLocation.latitude}, ${options.targetLocation.longitude}`
+        );
 
         // Extract the flux and mask buffers from input
         const { fluxBuffer, maskBuffer, metadata } =
@@ -54,6 +77,20 @@ class AnnualFluxProcessor extends Processor {
           bounds,
         } = processedFluxGeoTiff;
 
+        // Validate that we have geographic bounds for coordinate transformation
+        if (!bounds) {
+          throw new Error(
+            "[AnnualFluxProcessor] No geographic bounds found in annual flux GeoTIFF. " +
+              "Cannot perform coordinate transformation for targeted building detection."
+          );
+        }
+
+        console.log(
+          `[AnnualFluxProcessor] Annual flux GeoTIFF bounds: ${JSON.stringify(
+            bounds
+          )}`
+        );
+
         const width = fluxMetadata.width;
         const height = fluxMetadata.height;
 
@@ -68,7 +105,7 @@ class AnnualFluxProcessor extends Processor {
         // Store raw flux data for visualization
         const rawFluxRaster = [...fluxRaster]; // Clone to preserve
 
-        // Process the mask if available
+        // Process the mask if available - REQUIRED for target building detection
         let maskRaster = null;
         let buildingBoundaries = null;
 
@@ -77,20 +114,18 @@ class AnnualFluxProcessor extends Processor {
             maskBuffer,
             width,
             height,
+            options.targetLocation, // Pass target location
+            bounds, // Pass bounds for coordinate transformation
             options
           );
 
           maskRaster = processingResult.maskRaster;
           buildingBoundaries = processingResult.buildingBoundaries;
         } else {
-          // Create default mask and boundaries if no mask provided
-          console.log(
-            "[AnnualFluxProcessor] Using default mask and boundaries"
-          );
-          maskRaster = this.createDefaultMask(width, height);
-          buildingBoundaries = this.createDefaultBuildingBoundaries(
-            width,
-            height
+          // No mask data available - this is a problem for the new approach
+          throw new Error(
+            "[AnnualFluxProcessor] Mask data is required for target building detection. " +
+              "Cannot identify target building without mask data."
           );
         }
 
@@ -131,7 +166,7 @@ class AnnualFluxProcessor extends Processor {
           buildingBoundaries.hasBuilding
         ) {
           console.log(
-            "[AnnualFluxProcessor] Cropping data to building boundaries"
+            "[AnnualFluxProcessor] Cropping data to target building boundaries"
           );
 
           // Use the centralized utility for cropping
@@ -187,6 +222,8 @@ class AnnualFluxProcessor extends Processor {
             ...fluxMetadata,
             ...metadata,
             dataRange,
+            targetLocation: options.targetLocation,
+            targetBuildingDetected: buildingBoundaries?.targetBuilding || false,
           },
           // IMPORTANT: Store both cropped and uncropped versions
           raster: croppedFluxRaster, // Masked and cropped for building focus
@@ -212,7 +249,12 @@ class AnnualFluxProcessor extends Processor {
     } catch (error) {
       return this.handleProcessingError(error, "process", {
         layerType: "annualFlux",
-        options,
+        options: {
+          ...options,
+          targetLocation: options.targetLocation
+            ? "[LOCATION PROVIDED]"
+            : "[NO LOCATION]",
+        },
       });
     }
   }
@@ -301,15 +343,24 @@ class AnnualFluxProcessor extends Processor {
   }
 
   /**
-   * Process mask data
+   * Process mask data with targeted building detection
    * @private
    * @param {Buffer} maskBuffer - Mask data buffer
    * @param {number} fluxWidth - Width of flux data
    * @param {number} fluxHeight - Height of flux data
+   * @param {Object} targetLocation - Target location {latitude, longitude}
+   * @param {Object} bounds - Geographic bounds for coordinate transformation
    * @param {Object} options - Processing options
    * @returns {Promise<Object>} - Processed mask and building boundaries
    */
-  async processMask(maskBuffer, fluxWidth, fluxHeight, options = {}) {
+  async processMask(
+    maskBuffer,
+    fluxWidth,
+    fluxHeight,
+    targetLocation,
+    bounds,
+    options = {}
+  ) {
     try {
       console.log("[AnnualFluxProcessor] Processing mask data");
 
@@ -356,102 +407,67 @@ class AnnualFluxProcessor extends Processor {
 
       // Handle empty mask
       if (nonZeroCount === 0) {
-        console.warn(
-          "[AnnualFluxProcessor] Mask has no non-zero values, creating default mask"
+        throw new Error(
+          "[AnnualFluxProcessor] Mask has no non-zero values. Cannot perform target building detection."
         );
-        maskRaster = this.createDefaultMask(fluxWidth, fluxHeight);
       }
 
-      // Find building boundaries
+      // Find building boundaries using targeted detection
       const buildingMargin = 0;
 
-      let buildingBoundaries = VisualizationUtils.findBuildingBoundaries(
-        maskRaster,
-        fluxWidth,
-        fluxHeight,
-        { margin: buildingMargin }
-      );
-
-      // Create default boundaries if none found
-      if (!buildingBoundaries.hasBuilding) {
-        console.warn(
-          "[AnnualFluxProcessor] No building found in mask, using default boundaries"
+      try {
+        console.log(
+          "[AnnualFluxProcessor] Finding target building boundaries..."
         );
-        buildingBoundaries = this.createDefaultBuildingBoundaries(
+
+        let buildingBoundaries = VisualizationUtils.findBuildingBoundaries(
+          maskRaster,
           fluxWidth,
-          fluxHeight
+          fluxHeight,
+          { margin: buildingMargin, threshold: 0 },
+          targetLocation, // Target location for building detection
+          bounds // Geographic bounds for coordinate transformation
+        );
+
+        if (buildingBoundaries.hasBuilding) {
+          console.log(
+            `[AnnualFluxProcessor] Found target building boundaries: (${buildingBoundaries.minX},${buildingBoundaries.minY}) to (${buildingBoundaries.maxX},${buildingBoundaries.maxY})`
+          );
+
+          if (buildingBoundaries.targetBuilding) {
+            console.log(
+              `[AnnualFluxProcessor] Successfully detected target building with ${
+                buildingBoundaries.connectedPixelCount || "unknown"
+              } connected pixels`
+            );
+          }
+        } else {
+          console.warn(
+            "[AnnualFluxProcessor] No target building found in mask data"
+          );
+        }
+
+        return { maskRaster, buildingBoundaries };
+      } catch (error) {
+        console.error(
+          `[AnnualFluxProcessor] Error finding target building boundaries: ${error.message}`
+        );
+
+        // For the new approach, we want to fail rather than continue with defaults
+        throw new Error(
+          `Failed to find target building boundaries: ${error.message}`
         );
       }
-
-      return { maskRaster, buildingBoundaries };
     } catch (error) {
       console.error(
         `[AnnualFluxProcessor] Error processing mask: ${error.message}`
       );
 
-      // Return defaults on error
-      const maskRaster = this.createDefaultMask(fluxWidth, fluxHeight);
-      const buildingBoundaries = this.createDefaultBuildingBoundaries(
-        fluxWidth,
-        fluxHeight
+      // For the new targeted approach, we should propagate the error
+      throw new Error(
+        `Failed to process mask data for target building detection: ${error.message}`
       );
-
-      return { maskRaster, buildingBoundaries };
     }
-  }
-
-  /**
-   * Create a default mask with a building region in the center
-   * @private
-   * @param {number} width - Width of mask
-   * @param {number} height - Height of mask
-   * @returns {Array} - Default mask data
-   */
-  createDefaultMask(width, height) {
-    const mask = new Array(width * height).fill(0);
-
-    // Create a building region in the center (30-70% of dimensions)
-    const startX = Math.floor(width * 0.3);
-    const endX = Math.floor(width * 0.7);
-    const startY = Math.floor(height * 0.3);
-    const endY = Math.floor(height * 0.7);
-
-    for (let y = startY; y < endY; y++) {
-      for (let x = startX; x < endX; x++) {
-        const idx = y * width + x;
-        mask[idx] = 1; // Mark as building
-      }
-    }
-
-    console.log(
-      `[AnnualFluxProcessor] Created default mask with building region (${startX},${startY}) to (${endX},${endY})`
-    );
-
-    return mask;
-  }
-
-  /**
-   * Create default building boundaries for center region
-   * @private
-   * @param {number} width - Width of image
-   * @param {number} height - Height of image
-   * @returns {Object} - Building boundaries object
-   */
-  createDefaultBuildingBoundaries(width, height) {
-    const minX = Math.floor(width * 0.3);
-    const maxX = Math.floor(width * 0.7);
-    const minY = Math.floor(height * 0.3);
-    const maxY = Math.floor(height * 0.7);
-
-    return {
-      minX,
-      maxX,
-      minY,
-      maxY,
-      width: maxX - minX,
-      height: maxY - minY,
-      hasBuilding: true,
-    };
   }
 
   /**

@@ -34,11 +34,36 @@ class HourlyShadeProcessor extends Processor {
    * Process raw hourly shade data
    * @param {Object} rawData - The raw data object
    * @param {Object} options - Processing options
+   * @param {Object} [options.targetLocation] - REQUIRED: Target location {latitude, longitude} for building detection
    * @returns {Promise<Object>} - Processed hourly shade data
    */
   async process(rawData, options = {}) {
     try {
       return await this.timeOperation("process", async () => {
+        console.log("[HourlyShadeProcessor] Processing hourly shade data");
+
+        // Validate target location for building detection
+        if (!options.targetLocation) {
+          throw new Error(
+            "[HourlyShadeProcessor] targetLocation is required for building boundary detection. " +
+              "This should be provided by the LayerManager."
+          );
+        }
+
+        if (
+          !options.targetLocation.latitude ||
+          !options.targetLocation.longitude
+        ) {
+          throw new Error(
+            "[HourlyShadeProcessor] targetLocation must have latitude and longitude properties. " +
+              `Received: ${JSON.stringify(options.targetLocation)}`
+          );
+        }
+
+        console.log(
+          `[HourlyShadeProcessor] Using target location for building detection: ${options.targetLocation.latitude}, ${options.targetLocation.longitude}`
+        );
+
         // Extract buffers from object or use raw buffer directly
         let hourlyShadeBuffer, maskBuffer, fetcherMetadata;
 
@@ -66,7 +91,6 @@ class HourlyShadeProcessor extends Processor {
         this.validateRawData(hourlyShadeBuffer);
 
         // Set default options
-        const useMask = options.useMask !== false && maskBuffer;
         const buildingMargin =
           options.buildingMargin || config.visualization.BUILDING_MARGIN;
         const day = options.day || 15; // Default to middle of month
@@ -95,13 +119,29 @@ class HourlyShadeProcessor extends Processor {
           bounds,
         } = processedHourlyShadeGeoTiff;
 
-        // Process mask data if available
+        // Validate that we have geographic bounds for coordinate transformation
+        if (!bounds) {
+          throw new Error(
+            "[HourlyShadeProcessor] No geographic bounds found in hourly shade GeoTIFF. " +
+              "Cannot perform coordinate transformation for targeted building detection."
+          );
+        }
+
+        console.log(
+          `[HourlyShadeProcessor] Hourly shade GeoTIFF bounds: ${JSON.stringify(
+            bounds
+          )}`
+        );
+
+        // Process mask data if available - REQUIRED for target building detection
         let maskRaster = null;
         let buildingBoundaries = null;
         let maskDimensions = null;
 
-        if (useMask && maskBuffer) {
+        if (maskBuffer) {
           try {
+            console.log("[HourlyShadeProcessor] Processing mask data");
+
             const processedMaskGeoTiff = await this.geotiffProcessor.process(
               maskBuffer,
               {
@@ -121,19 +161,90 @@ class HourlyShadeProcessor extends Processor {
               height: maskMetadata.height,
             };
 
-            // Extract building boundaries using the original mask dimensions
-            buildingBoundaries = VisualizationUtils.findBuildingBoundaries(
-              maskRaster,
-              maskMetadata.width,
-              maskMetadata.height,
-              { margin: buildingMargin, threshold: 0 }
-            );
+            // Check if mask dimensions match hourly shade dimensions
+            if (
+              maskMetadata.width !== hourlyShadeMetadata.width ||
+              maskMetadata.height !== hourlyShadeMetadata.height
+            ) {
+              console.log(
+                `[HourlyShadeProcessor] Mask dimensions (${maskMetadata.width}x${maskMetadata.height}) don't match hourly shade (${hourlyShadeMetadata.width}x${hourlyShadeMetadata.height}). Resampling...`
+              );
+
+              // Resample the mask to match hourly shade dimensions
+              maskRaster = VisualizationUtils.resampleRaster(
+                maskRaster,
+                maskMetadata.width,
+                maskMetadata.height,
+                hourlyShadeMetadata.width,
+                hourlyShadeMetadata.height,
+                { method: "nearest" } // Use nearest neighbor for masks to preserve binary values
+              );
+
+              // Update mask dimensions to match resampled data
+              maskDimensions = {
+                width: hourlyShadeMetadata.width,
+                height: hourlyShadeMetadata.height,
+              };
+            }
+
+            // Extract building boundaries using targeted detection
+            try {
+              console.log(
+                "[HourlyShadeProcessor] Finding target building boundaries..."
+              );
+
+              buildingBoundaries = VisualizationUtils.findBuildingBoundaries(
+                maskRaster,
+                maskDimensions.width,
+                maskDimensions.height,
+                { margin: buildingMargin, threshold: 0 },
+                options.targetLocation, // Target location for building detection
+                bounds // Geographic bounds from GeoTIFF for coordinate transformation
+              );
+
+              if (buildingBoundaries.hasBuilding) {
+                console.log(
+                  `[HourlyShadeProcessor] Found target building boundaries: (${buildingBoundaries.minX},${buildingBoundaries.minY}) to (${buildingBoundaries.maxX},${buildingBoundaries.maxY})`
+                );
+
+                if (buildingBoundaries.targetBuilding) {
+                  console.log(
+                    `[HourlyShadeProcessor] Successfully detected target building with ${
+                      buildingBoundaries.connectedPixelCount || "unknown"
+                    } connected pixels`
+                  );
+                }
+              } else {
+                console.warn(
+                  "[HourlyShadeProcessor] No target building found in mask data"
+                );
+              }
+            } catch (error) {
+              console.error(
+                `[HourlyShadeProcessor] Error finding target building boundaries: ${error.message}`
+              );
+
+              // For the new approach, we want to fail rather than continue with defaults
+              throw new Error(
+                `Failed to find target building boundaries: ${error.message}`
+              );
+            }
           } catch (error) {
-            console.warn(
-              `[HourlyShadeProcessor] Mask processing failed: ${error.message}`
+            console.error(
+              `[HourlyShadeProcessor] Error processing mask: ${error.message}`
             );
-            // Continue without mask data
+
+            // For the new targeted approach, we should propagate the error
+            throw new Error(
+              `Failed to process mask data for target building detection: ${error.message}`
+            );
           }
+        } else {
+          // No mask data available - this is a problem for the new approach
+          throw new Error(
+            "[HourlyShadeProcessor] Mask data is required for target building detection. " +
+              "Cannot identify target building without mask data."
+          );
         }
 
         // Apply day bit mask to each hourly raster
@@ -186,6 +297,8 @@ class HourlyShadeProcessor extends Processor {
             month,
             day,
             hasMask: !!maskRaster,
+            targetLocation: options.targetLocation,
+            targetBuildingDetected: buildingBoundaries?.targetBuilding || false,
           },
           hourlyData,
           bounds,
@@ -193,12 +306,18 @@ class HourlyShadeProcessor extends Processor {
           maskRaster,
         };
 
+        console.log("[HourlyShadeProcessor] Hourly shade processing complete");
         return result;
       });
     } catch (error) {
       return this.handleProcessingError(error, "process", {
         layerType: "hourlyShade",
-        options,
+        options: {
+          ...options,
+          targetLocation: options.targetLocation
+            ? "[LOCATION PROVIDED]"
+            : "[NO LOCATION]",
+        },
       });
     }
   }

@@ -40,6 +40,7 @@ class RgbProcessor extends Processor {
    * @param {Buffer} [rawData.maskData] - The raw mask data buffer (optional)
    * @param {Object} [rawData.metadata] - Additional metadata from the fetcher
    * @param {Object} options - Processing options
+   * @param {Object} [options.targetLocation] - REQUIRED: Target location {latitude, longitude} for building detection
    * @param {boolean} [options.useMask=true] - Whether to use mask data if available
    * @param {number} [options.buildingMargin=0] - Margin to add around building boundaries
    * @param {boolean} [options.cropToBuilding=true] - Whether to crop to building boundaries
@@ -51,6 +52,28 @@ class RgbProcessor extends Processor {
     try {
       return await this.timeOperation("process", async () => {
         console.log("[RgbProcessor] Processing RGB data");
+
+        // Validate target location for building detection
+        if (!options.targetLocation) {
+          throw new Error(
+            "[RgbProcessor] targetLocation is required for building boundary detection. " +
+              "This should be provided by the LayerManager."
+          );
+        }
+
+        if (
+          !options.targetLocation.latitude ||
+          !options.targetLocation.longitude
+        ) {
+          throw new Error(
+            "[RgbProcessor] targetLocation must have latitude and longitude properties. " +
+              `Received: ${JSON.stringify(options.targetLocation)}`
+          );
+        }
+
+        console.log(
+          `[RgbProcessor] Using target location for building detection: ${options.targetLocation.latitude}, ${options.targetLocation.longitude}`
+        );
 
         // Check if we have a combined object with both RGB and mask data
         const isRawObject =
@@ -126,6 +149,18 @@ class RgbProcessor extends Processor {
           bounds,
         } = processedRgbGeoTiff;
 
+        // Validate that we have geographic bounds for coordinate transformation
+        if (!bounds) {
+          throw new Error(
+            "[RgbProcessor] No geographic bounds found in RGB GeoTIFF. " +
+              "Cannot perform coordinate transformation for targeted building detection."
+          );
+        }
+
+        console.log(
+          `[RgbProcessor] RGB GeoTIFF bounds: ${JSON.stringify(bounds)}`
+        );
+
         // Get original dimensions
         const width = rgbMetadata.width;
         const height = rgbMetadata.height;
@@ -171,64 +206,65 @@ class RgbProcessor extends Processor {
               maskRaster = maskRasters[0];
             }
 
-            // Extract building boundaries
+            // Extract building boundaries using targeted detection
             try {
+              console.log(
+                "[RgbProcessor] Finding target building boundaries..."
+              );
+
               buildingBoundaries = VisualizationUtils.findBuildingBoundaries(
                 maskRaster,
                 width,
                 height,
-                { margin: buildingMargin }
+                { margin: buildingMargin, threshold: 0 },
+                options.targetLocation, // Target location for building detection
+                bounds // Geographic bounds from GeoTIFF for coordinate transformation
               );
 
               if (buildingBoundaries.hasBuilding) {
                 console.log(
-                  `[RgbProcessor] Found building boundaries: (${buildingBoundaries.minX},${buildingBoundaries.minY}) to (${buildingBoundaries.maxX},${buildingBoundaries.maxY})`
+                  `[RgbProcessor] Found target building boundaries: (${buildingBoundaries.minX},${buildingBoundaries.minY}) to (${buildingBoundaries.maxX},${buildingBoundaries.maxY})`
                 );
-              } else {
-                console.warn("[RgbProcessor] No building found in mask data");
 
-                // Create default building boundaries for center region if none found
-                buildingBoundaries =
-                  VisualizationUtils.createDefaultBuildingBoundaries(
-                    width,
-                    height
+                if (buildingBoundaries.targetBuilding) {
+                  console.log(
+                    `[RgbProcessor] Successfully detected target building with ${
+                      buildingBoundaries.connectedPixelCount || "unknown"
+                    } connected pixels`
                   );
+                }
+              } else {
+                console.warn(
+                  "[RgbProcessor] No target building found in mask data"
+                );
               }
             } catch (error) {
               console.error(
-                `[RgbProcessor] Error finding building boundaries: ${error.message}`
+                `[RgbProcessor] Error finding target building boundaries: ${error.message}`
               );
 
-              // Create default building boundaries as fallback
-              buildingBoundaries =
-                VisualizationUtils.createDefaultBuildingBoundaries(
-                  width,
-                  height
-                );
+              // For the new approach, we want to fail rather than continue with defaults
+              // This ensures we get clear feedback about what needs to be fixed
+              throw new Error(
+                `Failed to find target building boundaries: ${error.message}`
+              );
             }
           } catch (error) {
-            console.warn(
+            console.error(
               `[RgbProcessor] Failed to process mask data: ${error.message}`
             );
-            // Continue without mask data
 
-            // Create default building boundaries and mask
-            buildingBoundaries =
-              VisualizationUtils.createDefaultBuildingBoundaries(width, height);
-            maskRaster = VisualizationUtils.createDefaultMask(
-              width,
-              height,
-              buildingBoundaries
+            // For the new targeted approach, we should propagate the error
+            // rather than falling back to defaults
+            throw new Error(
+              `Failed to process mask data for target building detection: ${error.message}`
             );
           }
         } else {
-          // Create default building boundaries and mask if not provided
-          buildingBoundaries =
-            VisualizationUtils.createDefaultBuildingBoundaries(width, height);
-          maskRaster = VisualizationUtils.createDefaultMask(
-            width,
-            height,
-            buildingBoundaries
+          // No mask data available - this is a problem for the new approach
+          throw new Error(
+            "[RgbProcessor] Mask data is required for target building detection. " +
+              "Cannot identify target building without mask data."
           );
         }
 
@@ -293,6 +329,8 @@ class RgbProcessor extends Processor {
               width: Math.ceil(buildingBoundaries.width * scaleX),
               height: Math.ceil(buildingBoundaries.height * scaleY),
               hasBuilding: buildingBoundaries.hasBuilding,
+              targetBuilding: buildingBoundaries.targetBuilding,
+              connectedPixelCount: buildingBoundaries.connectedPixelCount,
             };
 
             console.log(
@@ -321,7 +359,9 @@ class RgbProcessor extends Processor {
           buildingBoundaries &&
           buildingBoundaries.hasBuilding
         ) {
-          console.log("[RgbProcessor] Cropping data to building boundaries");
+          console.log(
+            "[RgbProcessor] Cropping data to target building boundaries"
+          );
 
           // Use the centralized utility for cropping multi-band rasters
           const cropResult = VisualizationUtils.cropRastersToBuilding(
@@ -370,6 +410,8 @@ class RgbProcessor extends Processor {
             },
             bands: croppedRgbRasters.length,
             hasMask: !!croppedMaskRaster,
+            targetLocation: options.targetLocation,
+            targetBuildingDetected: buildingBoundaries?.targetBuilding || false,
             buildingBoundaries: buildingBoundaries
               ? {
                   exists: buildingBoundaries.hasBuilding,
@@ -391,7 +433,12 @@ class RgbProcessor extends Processor {
     } catch (error) {
       return this.handleProcessingError(error, "process", {
         layerType: "rgb",
-        options,
+        options: {
+          ...options,
+          targetLocation: options.targetLocation
+            ? "[LOCATION PROVIDED]"
+            : "[NO LOCATION]",
+        },
       });
     }
   }

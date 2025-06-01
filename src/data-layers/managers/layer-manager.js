@@ -138,7 +138,13 @@ class LayerManager {
       let processedData;
 
       try {
-        processedData = await processor.process(rawData, options);
+        // UPDATED: Pass targetLocation to processor for building detection
+        const processingOptions = {
+          ...options,
+          targetLocation: location, // Add target location for building boundary detection
+        };
+
+        processedData = await processor.process(rawData, processingOptions);
         console.log(
           `[LayerManager] [${operationId}] Data processed in ${
             Date.now() - processStart

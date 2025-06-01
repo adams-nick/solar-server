@@ -6,54 +6,197 @@ const { createCanvas, Image } = require("canvas");
 
 class VisualizationUtils {
   /**
-   * Find building boundaries in mask data
+   * Find building boundaries in mask data using targeted building detection
    * @param {TypedArray|Array} maskData - Mask raster data
    * @param {number} width - Image width
    * @param {number} height - Image height
    * @param {Object} options - Options
    * @param {number} [options.margin=0] - Margin to add around boundaries
    * @param {number} [options.threshold=0] - Threshold value for mask (pixels > threshold are buildings)
+   * @param {Object} targetLocation - REQUIRED: Target location {latitude, longitude}
+   * @param {Object} geoTransform - REQUIRED: GeoTIFF transformation parameters
    * @returns {Object} - Building boundary information
    */
-  static findBuildingBoundaries(maskData, width, height, options = {}) {
+  static findBuildingBoundaries(
+    maskData,
+    width,
+    height,
+    options = {},
+    targetLocation,
+    geoTransform
+  ) {
+    // ENFORCE NEW APPROACH - NO FALLBACKS
+    if (!targetLocation || !geoTransform) {
+      throw new Error(
+        `[VisualizationUtils] findBuildingBoundaries now requires targetLocation and geoTransform parameters. ` +
+          `Update your processor to pass these parameters. ` +
+          `Received: targetLocation=${!!targetLocation}, geoTransform=${!!geoTransform}`
+      );
+    }
+
+    if (!targetLocation.latitude || !targetLocation.longitude) {
+      throw new Error(
+        `[VisualizationUtils] targetLocation must have latitude and longitude properties. ` +
+          `Received: ${JSON.stringify(targetLocation)}`
+      );
+    }
+
+    try {
+      console.log(
+        `[VisualizationUtils] Using targeted building detection for location: ${targetLocation.latitude}, ${targetLocation.longitude}`
+      );
+      return this.findTargetBuildingBoundaries(
+        maskData,
+        width,
+        height,
+        targetLocation,
+        geoTransform,
+        options
+      );
+    } catch (error) {
+      console.error(
+        `Error finding target building boundaries: ${error.message}`
+      );
+      throw new Error(
+        `Failed to find target building boundaries: ${error.message}`
+      );
+    }
+  }
+
+  /**
+   * Find boundaries for the specific target building using connected component analysis
+   * @param {TypedArray|Array} maskData - Mask raster data
+   * @param {number} width - Image width
+   * @param {number} height - Image height
+   * @param {Object} targetLocation - Target location {latitude, longitude}
+   * @param {Object} geoTransform - GeoTIFF transformation parameters
+   * @param {Object} options - Options
+   * @returns {Object} - Building boundary information for target building only
+   */
+  static findTargetBuildingBoundaries(
+    maskData,
+    width,
+    height,
+    targetLocation,
+    geoTransform,
+    options = {}
+  ) {
     try {
       const margin = options.margin ?? 0;
       const threshold = options.threshold ?? 0;
 
-      // Find min/max coordinates where mask value > threshold
+      // Convert target location to pixel coordinates
+      const targetPixel = this.geoToPixel(
+        targetLocation,
+        geoTransform,
+        width,
+        height
+      );
+
+      if (!targetPixel) {
+        throw new Error(
+          "[VisualizationUtils] Could not convert target location to pixel coordinates"
+        );
+      }
+
+      console.log(
+        `[VisualizationUtils] Target pixel coordinates: (${targetPixel.x}, ${targetPixel.y})`
+      );
+
+      // Check if the target pixel is actually on a building
+      const targetIndex = targetPixel.y * width + targetPixel.x;
+      if (maskData[targetIndex] <= threshold) {
+        console.warn(
+          `[VisualizationUtils] Target pixel is not on a building (value: ${maskData[targetIndex]}), searching nearby`
+        );
+
+        // Search in a small radius around the target point for a building pixel
+        const searchRadius = 10;
+        let foundBuildingPixel = null;
+
+        for (
+          let dy = -searchRadius;
+          dy <= searchRadius && !foundBuildingPixel;
+          dy++
+        ) {
+          for (
+            let dx = -searchRadius;
+            dx <= searchRadius && !foundBuildingPixel;
+            dx++
+          ) {
+            const searchX = targetPixel.x + dx;
+            const searchY = targetPixel.y + dy;
+
+            if (
+              searchX >= 0 &&
+              searchX < width &&
+              searchY >= 0 &&
+              searchY < height
+            ) {
+              const searchIndex = searchY * width + searchX;
+              if (maskData[searchIndex] > threshold) {
+                foundBuildingPixel = { x: searchX, y: searchY };
+                console.log(
+                  `[VisualizationUtils] Found building pixel nearby at (${searchX}, ${searchY})`
+                );
+              }
+            }
+          }
+        }
+
+        if (!foundBuildingPixel) {
+          throw new Error(
+            "[VisualizationUtils] No building found near target location"
+          );
+        }
+
+        // Update target pixel to the found building pixel
+        targetPixel.x = foundBuildingPixel.x;
+        targetPixel.y = foundBuildingPixel.y;
+      }
+
+      // Perform flood-fill to find all connected building pixels
+      const connectedPixels = this.floodFill(
+        maskData,
+        width,
+        height,
+        targetPixel.x,
+        targetPixel.y,
+        threshold
+      );
+
+      if (connectedPixels.length === 0) {
+        throw new Error(
+          "[VisualizationUtils] No connected building pixels found"
+        );
+      }
+
+      console.log(
+        `[VisualizationUtils] Found ${connectedPixels.length} connected building pixels`
+      );
+
+      // Find bounding box of connected pixels
       let minX = width;
       let maxX = 0;
       let minY = height;
       let maxY = 0;
-      let foundBuilding = false;
 
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const index = y * width + x;
-          if (maskData[index] > threshold) {
-            minX = Math.min(minX, x);
-            maxX = Math.max(maxX, x);
-            minY = Math.min(minY, y);
-            maxY = Math.max(maxY, y);
-            foundBuilding = true;
-          }
-        }
+      for (const pixel of connectedPixels) {
+        minX = Math.min(minX, pixel.x);
+        maxX = Math.max(maxX, pixel.x);
+        minY = Math.min(minY, pixel.y);
+        maxY = Math.max(maxY, pixel.y);
       }
 
       // Add margin around the building
-      if (foundBuilding) {
-        minX = Math.max(0, minX - margin);
-        minY = Math.max(0, minY - margin);
-        maxX = Math.min(width - 1, maxX + margin);
-        maxY = Math.min(height - 1, maxY + margin);
-      } else {
-        console.warn("No building found in mask data");
-        // Default to full image
-        minX = 0;
-        minY = 0;
-        maxX = width - 1;
-        maxY = height - 1;
-      }
+      minX = Math.max(0, minX - margin);
+      minY = Math.max(0, minY - margin);
+      maxX = Math.min(width - 1, maxX + margin);
+      maxY = Math.min(height - 1, maxY + margin);
+
+      console.log(
+        `[VisualizationUtils] Target building boundaries: (${minX},${minY}) to (${maxX},${maxY})`
+      );
 
       return {
         minX,
@@ -62,21 +205,148 @@ class VisualizationUtils {
         maxY,
         width: maxX - minX + 1,
         height: maxY - minY + 1,
-        hasBuilding: foundBuilding,
+        hasBuilding: true,
+        targetBuilding: true,
+        connectedPixelCount: connectedPixels.length,
       };
     } catch (error) {
-      console.error(`Error finding building boundaries: ${error.message}`);
-      // Return default values covering the whole image
-      return {
-        minX: 0,
-        maxX: width - 1,
-        minY: 0,
-        maxY: height - 1,
-        width: width,
-        height: height,
-        hasBuilding: false,
-        error: error.message,
-      };
+      console.error(
+        `Error finding target building boundaries: ${error.message}`
+      );
+      throw new Error(
+        `Failed to find target building boundaries: ${error.message}`
+      );
+    }
+  }
+
+  /**
+   * Convert geographic coordinates to pixel coordinates using GeoTIFF transform
+   * @param {Object} location - Geographic location {latitude, longitude}
+   * @param {Object} geoTransform - GeoTIFF transformation parameters
+   * @param {number} width - Image width
+   * @param {number} height - Image height
+   * @returns {Object|null} - Pixel coordinates {x, y} or null if conversion fails
+   */
+  static geoToPixel(location, geoTransform, width, height) {
+    try {
+      const { latitude, longitude } = location;
+
+      // Extract transformation parameters
+      // geoTransform can come in different formats, try to handle common ones
+      let originX, originY, pixelSizeX, pixelSizeY;
+
+      if (geoTransform.west !== undefined) {
+        // Bounds format: {west, east, south, north}
+        originX = geoTransform.west;
+        originY = geoTransform.north;
+        pixelSizeX = (geoTransform.east - geoTransform.west) / width;
+        pixelSizeY = (geoTransform.south - geoTransform.north) / height; // Negative because Y increases downward
+      } else if (Array.isArray(geoTransform) && geoTransform.length >= 6) {
+        // GDAL affine transform format: [originX, pixelSizeX, skewX, originY, skewY, pixelSizeY]
+        originX = geoTransform[0];
+        originY = geoTransform[3];
+        pixelSizeX = geoTransform[1];
+        pixelSizeY = geoTransform[5];
+      } else if (geoTransform.xmin !== undefined) {
+        // Alternative bounds format: {xmin, xmax, ymin, ymax}
+        originX = geoTransform.xmin;
+        originY = geoTransform.ymax;
+        pixelSizeX = (geoTransform.xmax - geoTransform.xmin) / width;
+        pixelSizeY = (geoTransform.ymin - geoTransform.ymax) / height;
+      } else {
+        console.error(
+          "[VisualizationUtils] Unsupported geoTransform format:",
+          geoTransform
+        );
+        return null;
+      }
+
+      // Convert geographic coordinates to pixel coordinates
+      const pixelX = Math.round((longitude - originX) / pixelSizeX);
+      const pixelY = Math.round((latitude - originY) / pixelSizeY);
+
+      // Ensure pixel coordinates are within image bounds
+      if (pixelX < 0 || pixelX >= width || pixelY < 0 || pixelY >= height) {
+        console.warn(
+          `[VisualizationUtils] Target pixel (${pixelX}, ${pixelY}) is outside image bounds (${width}x${height})`
+        );
+
+        // Clamp to image bounds
+        const clampedX = Math.max(0, Math.min(width - 1, pixelX));
+        const clampedY = Math.max(0, Math.min(height - 1, pixelY));
+
+        console.log(
+          `[VisualizationUtils] Clamped to (${clampedX}, ${clampedY})`
+        );
+
+        return { x: clampedX, y: clampedY };
+      }
+
+      return { x: pixelX, y: pixelY };
+    } catch (error) {
+      console.error(
+        `[VisualizationUtils] Error converting geo to pixel: ${error.message}`
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Perform flood-fill to find all pixels connected to a starting point
+   * @param {TypedArray|Array} maskData - Mask raster data
+   * @param {number} width - Image width
+   * @param {number} height - Image height
+   * @param {number} startX - Starting X coordinate
+   * @param {number} startY - Starting Y coordinate
+   * @param {number} threshold - Threshold value for mask (pixels > threshold are buildings)
+   * @returns {Array} - Array of connected pixel coordinates {x, y}
+   */
+  static floodFill(maskData, width, height, startX, startY, threshold) {
+    try {
+      const visited = new Set();
+      const connectedPixels = [];
+      const stack = [{ x: startX, y: startY }];
+
+      while (stack.length > 0) {
+        const { x, y } = stack.pop();
+
+        // Skip if out of bounds
+        if (x < 0 || x >= width || y < 0 || y >= height) {
+          continue;
+        }
+
+        // Create unique key for this pixel
+        const key = y * width + x;
+
+        // Skip if already visited
+        if (visited.has(key)) {
+          continue;
+        }
+
+        // Skip if not a building pixel
+        if (maskData[key] <= threshold) {
+          continue;
+        }
+
+        // Mark as visited and add to connected pixels
+        visited.add(key);
+        connectedPixels.push({ x, y });
+
+        // Add neighboring pixels to stack (4-connectivity)
+        stack.push(
+          { x: x + 1, y: y }, // Right
+          { x: x - 1, y: y }, // Left
+          { x: x, y: y + 1 }, // Down
+          { x: x, y: y - 1 } // Up
+        );
+      }
+
+      return connectedPixels;
+    } catch (error) {
+      console.error(
+        `[VisualizationUtils] Error in flood fill: ${error.message}`
+      );
+      return [];
     }
   }
 
@@ -138,6 +408,7 @@ class VisualizationUtils {
       width: buildingBoundaries.width,
       height: buildingBoundaries.height,
       hasBuilding: buildingBoundaries.hasBuilding,
+      targetBuilding: buildingBoundaries.targetBuilding || false,
       originalBoundaries: {
         minX: buildingBoundaries.minX,
         minY: buildingBoundaries.minY,

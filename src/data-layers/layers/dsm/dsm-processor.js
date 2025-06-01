@@ -37,6 +37,7 @@ class DsmProcessor extends Processor {
    * Process raw DSM data
    * @param {Object|Buffer} rawData - The raw data from fetcher
    * @param {Object} options - Processing options
+   * @param {Object} [options.targetLocation] - REQUIRED: Target location {latitude, longitude} for building detection
    * @param {boolean} [options.cropToBuilding=true] - Whether to crop to building boundaries
    * @param {Object} [options.targetDimensions] - Target dimensions to resample to
    * @returns {Promise<Object>} - Processed DSM data
@@ -45,6 +46,28 @@ class DsmProcessor extends Processor {
     try {
       return await this.timeOperation("process", async () => {
         console.log("[DsmProcessor] Processing DSM data");
+
+        // Validate target location for building detection
+        if (!options.targetLocation) {
+          throw new Error(
+            "[DsmProcessor] targetLocation is required for building boundary detection. " +
+              "This should be provided by the LayerManager."
+          );
+        }
+
+        if (
+          !options.targetLocation.latitude ||
+          !options.targetLocation.longitude
+        ) {
+          throw new Error(
+            "[DsmProcessor] targetLocation must have latitude and longitude properties. " +
+              `Received: ${JSON.stringify(options.targetLocation)}`
+          );
+        }
+
+        console.log(
+          `[DsmProcessor] Using target location for building detection: ${options.targetLocation.latitude}, ${options.targetLocation.longitude}`
+        );
 
         // Extract the DSM and mask buffers from input
         const { dsmBuffer, maskBuffer, metadata } =
@@ -63,6 +86,18 @@ class DsmProcessor extends Processor {
           bounds,
         } = processedDsmGeoTiff;
 
+        // Validate that we have geographic bounds for coordinate transformation
+        if (!bounds) {
+          throw new Error(
+            "[DsmProcessor] No geographic bounds found in DSM GeoTIFF. " +
+              "Cannot perform coordinate transformation for targeted building detection."
+          );
+        }
+
+        console.log(
+          `[DsmProcessor] DSM GeoTIFF bounds: ${JSON.stringify(bounds)}`
+        );
+
         const width = dsmMetadata.width;
         const height = dsmMetadata.height;
 
@@ -77,7 +112,7 @@ class DsmProcessor extends Processor {
         // Store raw DSM data for reference
         let rawDsmRaster = [...dsmRaster]; // Clone to preserve
 
-        // Process the mask if available
+        // Process the mask if available - REQUIRED for target building detection
         let maskRaster = null;
         let buildingBoundaries = null;
 
@@ -117,53 +152,63 @@ class DsmProcessor extends Processor {
               maskRaster = maskRasters[0];
             }
 
-            // Find building boundaries
-            buildingBoundaries = VisualizationUtils.findBuildingBoundaries(
-              maskRaster,
-              width,
-              height,
-              { margin: 0 } // No margin to get exact building bounds
-            );
-
-            if (!buildingBoundaries.hasBuilding) {
-              console.warn(
-                "[DsmProcessor] No building found in mask, using default boundaries"
+            // Find building boundaries using targeted detection
+            try {
+              console.log(
+                "[DsmProcessor] Finding target building boundaries..."
               );
-              buildingBoundaries =
-                VisualizationUtils.createDefaultBuildingBoundaries(
-                  width,
-                  height
-                );
 
-              // Also update mask to match the default boundaries
-              maskRaster = VisualizationUtils.createDefaultMask(
+              buildingBoundaries = VisualizationUtils.findBuildingBoundaries(
+                maskRaster,
                 width,
                 height,
-                buildingBoundaries
+                { margin: 0, threshold: 0 }, // No margin to get exact building bounds
+                options.targetLocation, // Target location for building detection
+                bounds // Geographic bounds from GeoTIFF for coordinate transformation
+              );
+
+              if (buildingBoundaries.hasBuilding) {
+                console.log(
+                  `[DsmProcessor] Found target building boundaries: (${buildingBoundaries.minX},${buildingBoundaries.minY}) to (${buildingBoundaries.maxX},${buildingBoundaries.maxY})`
+                );
+
+                if (buildingBoundaries.targetBuilding) {
+                  console.log(
+                    `[DsmProcessor] Successfully detected target building with ${
+                      buildingBoundaries.connectedPixelCount || "unknown"
+                    } connected pixels`
+                  );
+                }
+              } else {
+                console.warn(
+                  "[DsmProcessor] No target building found in mask data"
+                );
+              }
+            } catch (error) {
+              console.error(
+                `[DsmProcessor] Error finding target building boundaries: ${error.message}`
+              );
+
+              // For the new approach, we want to fail rather than continue with defaults
+              throw new Error(
+                `Failed to find target building boundaries: ${error.message}`
               );
             }
           } catch (error) {
             console.error(
               `[DsmProcessor] Error processing mask: ${error.message}`
             );
-            // Create defaults on error
-            buildingBoundaries =
-              VisualizationUtils.createDefaultBuildingBoundaries(width, height);
-            maskRaster = VisualizationUtils.createDefaultMask(
-              width,
-              height,
-              buildingBoundaries
+
+            // For the new targeted approach, we should propagate the error
+            throw new Error(
+              `Failed to process mask data for target building detection: ${error.message}`
             );
           }
         } else {
-          // Create default mask and boundaries if not provided
-          console.log("[DsmProcessor] No mask provided, creating defaults");
-          buildingBoundaries =
-            VisualizationUtils.createDefaultBuildingBoundaries(width, height);
-          maskRaster = VisualizationUtils.createDefaultMask(
-            width,
-            height,
-            buildingBoundaries
+          // No mask data available - this is a problem for the new approach
+          throw new Error(
+            "[DsmProcessor] Mask data is required for target building detection. " +
+              "Cannot identify target building without mask data."
           );
         }
 
@@ -244,6 +289,8 @@ class DsmProcessor extends Processor {
               width: Math.ceil(buildingBoundaries.width * scaleX),
               height: Math.ceil(buildingBoundaries.height * scaleY),
               hasBuilding: buildingBoundaries.hasBuilding,
+              targetBuilding: buildingBoundaries.targetBuilding,
+              connectedPixelCount: buildingBoundaries.connectedPixelCount,
             };
           }
 
@@ -280,7 +327,9 @@ class DsmProcessor extends Processor {
           buildingBoundaries &&
           buildingBoundaries.hasBuilding
         ) {
-          console.log("[DsmProcessor] Cropping data to building boundaries");
+          console.log(
+            "[DsmProcessor] Cropping data to target building boundaries"
+          );
 
           // Use the centralized utility for cropping
           const cropResult = VisualizationUtils.cropRastersToBuilding(
@@ -333,6 +382,8 @@ class DsmProcessor extends Processor {
             ...dsmMetadata,
             ...metadata,
             dataRange,
+            targetLocation: options.targetLocation,
+            targetBuildingDetected: buildingBoundaries?.targetBuilding || false,
             buildingBoundaries: buildingBoundaries
               ? {
                   exists: buildingBoundaries.hasBuilding,
@@ -355,7 +406,12 @@ class DsmProcessor extends Processor {
     } catch (error) {
       return this.handleProcessingError(error, "process", {
         layerType: "dsm",
-        options,
+        options: {
+          ...options,
+          targetLocation: options.targetLocation
+            ? "[LOCATION PROVIDED]"
+            : "[NO LOCATION]",
+        },
       });
     }
   }

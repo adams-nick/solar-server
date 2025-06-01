@@ -40,8 +40,8 @@ class MonthlyFluxProcessor extends Processor {
    * @param {Buffer} [rawData.maskData] - The raw mask data buffer (optional)
    * @param {Object} [rawData.metadata] - Additional metadata from the fetcher
    * @param {Object} options - Processing options
+   * @param {Object} [options.targetLocation] - REQUIRED: Target location {latitude, longitude} for building detection
    * @param {boolean} [options.processAllMonths=true] - Whether to process all 12 months
-   * @param {boolean} [options.useMask=true] - Whether to use mask data if available
    * @param {number} [options.buildingMargin=20] - Margin to add around building boundaries
    * @param {boolean} [options.calculateStatistics=true] - Whether to calculate statistics for each month
    * @returns {Promise<Object>} - Processed monthly flux data
@@ -51,6 +51,28 @@ class MonthlyFluxProcessor extends Processor {
     try {
       return await this.timeOperation("process", async () => {
         console.log("[MonthlyFluxProcessor] Processing monthly flux data");
+
+        // Validate target location for building detection
+        if (!options.targetLocation) {
+          throw new Error(
+            "[MonthlyFluxProcessor] targetLocation is required for building boundary detection. " +
+              "This should be provided by the LayerManager."
+          );
+        }
+
+        if (
+          !options.targetLocation.latitude ||
+          !options.targetLocation.longitude
+        ) {
+          throw new Error(
+            "[MonthlyFluxProcessor] targetLocation must have latitude and longitude properties. " +
+              `Received: ${JSON.stringify(options.targetLocation)}`
+          );
+        }
+
+        console.log(
+          `[MonthlyFluxProcessor] Using target location for building detection: ${options.targetLocation.latitude}, ${options.targetLocation.longitude}`
+        );
 
         // Check if we have a combined object with both monthly flux and mask data
         const isRawObject =
@@ -98,7 +120,6 @@ class MonthlyFluxProcessor extends Processor {
 
         // Set default options
         const processAllMonths = options.processAllMonths !== false;
-        const useMask = options.useMask !== false && maskBuffer;
         const buildingMargin =
           options.buildingMargin || config.visualization.BUILDING_MARGIN;
         const calculateStatistics = options.calculateStatistics !== false;
@@ -130,6 +151,20 @@ class MonthlyFluxProcessor extends Processor {
           bounds,
         } = processedFluxGeoTiff;
 
+        // Validate that we have geographic bounds for coordinate transformation
+        if (!bounds) {
+          throw new Error(
+            "[MonthlyFluxProcessor] No geographic bounds found in monthly flux GeoTIFF. " +
+              "Cannot perform coordinate transformation for targeted building detection."
+          );
+        }
+
+        console.log(
+          `[MonthlyFluxProcessor] Monthly flux GeoTIFF bounds: ${JSON.stringify(
+            bounds
+          )}`
+        );
+
         // Check for expected 12 bands for monthly data
         if (fluxRasters.length !== 12) {
           console.warn(
@@ -137,11 +172,11 @@ class MonthlyFluxProcessor extends Processor {
           );
         }
 
-        // Process mask data if available
+        // Process mask data if available - REQUIRED for target building detection
         let maskRaster = null;
         let buildingBoundaries = null;
 
-        if (useMask && maskBuffer) {
+        if (maskBuffer) {
           try {
             console.log("[MonthlyFluxProcessor] Processing mask data");
 
@@ -161,42 +196,81 @@ class MonthlyFluxProcessor extends Processor {
               maskMetadata.width !== fluxMetadata.width ||
               maskMetadata.height !== fluxMetadata.height
             ) {
-              console.warn(
-                "[MonthlyFluxProcessor] Mask and flux dimensions do not match. Mask will not be applied."
+              console.log(
+                `[MonthlyFluxProcessor] Mask dimensions (${maskMetadata.width}x${maskMetadata.height}) don't match flux (${fluxMetadata.width}x${fluxMetadata.height}). Resampling...`
+              );
+
+              // Resample the mask to match flux dimensions
+              maskRaster = VisualizationUtils.resampleRaster(
+                maskRasters[0],
+                maskMetadata.width,
+                maskMetadata.height,
+                fluxMetadata.width,
+                fluxMetadata.height,
+                { method: "nearest" } // Use nearest neighbor for masks to preserve binary values
               );
             } else {
               maskRaster = maskRasters[0];
+            }
 
-              // Extract building boundaries
-              try {
-                buildingBoundaries = VisualizationUtils.findBuildingBoundaries(
-                  maskRaster,
-                  maskMetadata.width,
-                  maskMetadata.height,
-                  { margin: buildingMargin }
+            // Extract building boundaries using targeted detection
+            try {
+              console.log(
+                "[MonthlyFluxProcessor] Finding target building boundaries..."
+              );
+
+              buildingBoundaries = VisualizationUtils.findBuildingBoundaries(
+                maskRaster,
+                fluxMetadata.width,
+                fluxMetadata.height,
+                { margin: buildingMargin, threshold: 0 },
+                options.targetLocation, // Target location for building detection
+                bounds // Geographic bounds from GeoTIFF for coordinate transformation
+              );
+
+              if (buildingBoundaries.hasBuilding) {
+                console.log(
+                  `[MonthlyFluxProcessor] Found target building boundaries: (${buildingBoundaries.minX},${buildingBoundaries.minY}) to (${buildingBoundaries.maxX},${buildingBoundaries.maxY})`
                 );
 
-                if (buildingBoundaries.hasBuilding) {
+                if (buildingBoundaries.targetBuilding) {
                   console.log(
-                    `[MonthlyFluxProcessor] Found building boundaries: (${buildingBoundaries.minX},${buildingBoundaries.minY}) to (${buildingBoundaries.maxX},${buildingBoundaries.maxY})`
-                  );
-                } else {
-                  console.warn(
-                    "[MonthlyFluxProcessor] No building found in mask data"
+                    `[MonthlyFluxProcessor] Successfully detected target building with ${
+                      buildingBoundaries.connectedPixelCount || "unknown"
+                    } connected pixels`
                   );
                 }
-              } catch (error) {
-                console.error(
-                  `[MonthlyFluxProcessor] Error finding building boundaries: ${error.message}`
+              } else {
+                console.warn(
+                  "[MonthlyFluxProcessor] No target building found in mask data"
                 );
               }
+            } catch (error) {
+              console.error(
+                `[MonthlyFluxProcessor] Error finding target building boundaries: ${error.message}`
+              );
+
+              // For the new approach, we want to fail rather than continue with defaults
+              throw new Error(
+                `Failed to find target building boundaries: ${error.message}`
+              );
             }
           } catch (error) {
-            console.warn(
-              `[MonthlyFluxProcessor] Failed to process mask data: ${error.message}`
+            console.error(
+              `[MonthlyFluxProcessor] Error processing mask: ${error.message}`
             );
-            // Continue without mask data
+
+            // For the new targeted approach, we should propagate the error
+            throw new Error(
+              `Failed to process mask data for target building detection: ${error.message}`
+            );
           }
+        } else {
+          // No mask data available - this is a problem for the new approach
+          throw new Error(
+            "[MonthlyFluxProcessor] Mask data is required for target building detection. " +
+              "Cannot identify target building without mask data."
+          );
         }
 
         // Check for no-data values and find valid data range
@@ -278,6 +352,8 @@ class MonthlyFluxProcessor extends Processor {
             months: fluxRasters.length,
             hasMask: !!maskRaster,
             noDataValue,
+            targetLocation: options.targetLocation,
+            targetBuildingDetected: buildingBoundaries?.targetBuilding || false,
           },
           monthlyData,
           bounds,
@@ -292,7 +368,12 @@ class MonthlyFluxProcessor extends Processor {
     } catch (error) {
       return this.handleProcessingError(error, "process", {
         layerType: "monthlyFlux",
-        options,
+        options: {
+          ...options,
+          targetLocation: options.targetLocation
+            ? "[LOCATION PROVIDED]"
+            : "[NO LOCATION]",
+        },
       });
     }
   }

@@ -36,6 +36,7 @@ class MaskProcessor extends Processor {
    * Process raw mask data
    * @param {Buffer} rawData - The raw mask data buffer
    * @param {Object} options - Processing options
+   * @param {Object} [options.targetLocation] - REQUIRED: Target location {latitude, longitude} for building detection
    * @param {boolean} [options.convertToArray=false] - Whether to convert TypedArrays to regular arrays
    * @param {boolean} [options.findBuildingBoundaries=true] - Whether to extract building boundaries
    * @param {number} [options.buildingMargin=20] - Margin to add around building boundaries
@@ -50,6 +51,28 @@ class MaskProcessor extends Processor {
 
         // Validate raw data
         this.validateRawData(rawData);
+
+        // Validate target location for building detection
+        if (!options.targetLocation) {
+          throw new Error(
+            "[MaskProcessor] targetLocation is required for building boundary detection. " +
+              "This should be provided by the LayerManager."
+          );
+        }
+
+        if (
+          !options.targetLocation.latitude ||
+          !options.targetLocation.longitude
+        ) {
+          throw new Error(
+            "[MaskProcessor] targetLocation must have latitude and longitude properties. " +
+              `Received: ${JSON.stringify(options.targetLocation)}`
+          );
+        }
+
+        console.log(
+          `[MaskProcessor] Using target location for building detection: ${options.targetLocation.latitude}, ${options.targetLocation.longitude}`
+        );
 
         // Set default options
         const convertToArray = options.convertToArray || false;
@@ -75,6 +98,18 @@ class MaskProcessor extends Processor {
         // Extract metadata and rasters
         const { metadata, rasters, bounds } = processedGeoTiff;
 
+        // Validate that we have geographic bounds for coordinate transformation
+        if (!bounds) {
+          throw new Error(
+            "[MaskProcessor] No geographic bounds found in GeoTIFF. " +
+              "Cannot perform coordinate transformation for targeted building detection."
+          );
+        }
+
+        console.log(
+          `[MaskProcessor] GeoTIFF bounds: ${JSON.stringify(bounds)}`
+        );
+
         // Ensure we have at least one raster
         if (!rasters || rasters.length === 0) {
           throw new Error("No raster data found in mask GeoTIFF");
@@ -90,25 +125,47 @@ class MaskProcessor extends Processor {
         let buildingBoundaries = null;
         if (findBuildingBoundaries) {
           try {
+            console.log(
+              "[MaskProcessor] Finding target building boundaries..."
+            );
+
+            // Use the new targeted building detection
             buildingBoundaries = VisualizationUtils.findBuildingBoundaries(
               maskRaster,
               metadata.width,
               metadata.height,
-              { margin: buildingMargin, threshold }
+              { margin: buildingMargin, threshold },
+              options.targetLocation, // Target location for building detection
+              bounds // Geographic bounds from GeoTIFF for coordinate transformation
             );
 
             if (buildingBoundaries.hasBuilding) {
               console.log(
-                `[MaskProcessor] Found building boundaries: (${buildingBoundaries.minX},${buildingBoundaries.minY}) to (${buildingBoundaries.maxX},${buildingBoundaries.maxY})`
+                `[MaskProcessor] Found target building boundaries: (${buildingBoundaries.minX},${buildingBoundaries.minY}) to (${buildingBoundaries.maxX},${buildingBoundaries.maxY})`
               );
+
+              if (buildingBoundaries.targetBuilding) {
+                console.log(
+                  `[MaskProcessor] Successfully detected target building with ${
+                    buildingBoundaries.connectedPixelCount || "unknown"
+                  } connected pixels`
+                );
+              }
             } else {
-              console.warn("[MaskProcessor] No building found in mask data");
+              console.warn(
+                "[MaskProcessor] No target building found in mask data"
+              );
             }
           } catch (error) {
             console.error(
               `[MaskProcessor] Error finding building boundaries: ${error.message}`
             );
-            // Continue processing even if building boundary extraction fails
+
+            // For the new approach, we want to fail rather than continue
+            // This ensures we get clear feedback about what needs to be fixed
+            throw new Error(
+              `Failed to find target building boundaries: ${error.message}`
+            );
           }
         }
 
@@ -120,6 +177,8 @@ class MaskProcessor extends Processor {
             stats,
             hasMask: stats.buildingPixels > 0,
             threshold,
+            targetLocation: options.targetLocation,
+            targetBuildingDetected: buildingBoundaries?.targetBuilding || false,
           },
           raster: maskRaster,
           bounds,
@@ -133,7 +192,12 @@ class MaskProcessor extends Processor {
     } catch (error) {
       return this.handleProcessingError(error, "process", {
         layerType: "mask",
-        options,
+        options: {
+          ...options,
+          targetLocation: options.targetLocation
+            ? "[LOCATION PROVIDED]"
+            : "[NO LOCATION]",
+        },
       });
     }
   }
