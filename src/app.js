@@ -47,6 +47,10 @@ app.use("/api/v1/roof", roofSegmentRoutes);
 const comprehensiveRoute = require("./api/routes/comprehensiveRoute");
 app.use("/api/v1/solar", comprehensiveRoute);
 
+// For training endpoint:
+const trainingRoutes = require("./api/routes/trainingRoutes");
+app.use("/api/v1/training", trainingRoutes);
+
 // Error handler
 app.use((err, req, res, next) => {
   console.error(err.stack);
