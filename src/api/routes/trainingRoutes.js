@@ -209,22 +209,13 @@ function validateTrainingDataSchema(data) {
   }
 
   // Data size validations (to prevent abuse)
-  if (data.prompts.length > 50) {
-    errors.push("prompts array cannot exceed 50 items");
+  if (data.prompts.length > 100) {
+    errors.push("prompts array cannot exceed 100 items");
   }
 
-  if (data.accepted_polygons.length > 20) {
-    errors.push("accepted_polygons array cannot exceed 20 items");
+  if (data.accepted_polygons.length > 100) {
+    errors.push("accepted_polygons array cannot exceed 100 items");
   }
-
-  // Check for reasonable polygon complexity
-  data.accepted_polygons.forEach((polygon, index) => {
-    if (polygon.polygon.length > 100) {
-      errors.push(
-        `accepted_polygons[${index}].polygon cannot exceed 100 points`
-      );
-    }
-  });
 
   return {
     isValid: errors.length === 0,

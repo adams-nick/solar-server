@@ -52,6 +52,9 @@ class RgbVisualizer extends Visualizer {
         const height = metadata.dimensions?.height || metadata.height;
 
         console.log(`[RgbVisualizer] Image dimensions: ${width}x${height}`);
+        console.log(
+          `[RgbVisualizer] Has building boundaries: ${!!buildingBoundaries?.hasBuilding}`
+        );
 
         // Ensure we have 3 bands for RGB
         if (rasters.length !== 3) {
@@ -60,30 +63,25 @@ class RgbVisualizer extends Visualizer {
           );
         }
 
-        // Create full image visualization
-        console.log("[RgbVisualizer] Creating full image visualization");
-        const fullImageDataUrl = await this.createRgbVisualization(
+        // IMPORTANT: The processor already crops the rasters to building boundaries
+        // So rasters[0], rasters[1], rasters[2] are already the correct size
+        // We just need to create visualizations from the provided data
+
+        // Create building-focused visualization (this is the main/primary view)
+        console.log(
+          "[RgbVisualizer] Creating building-focused visualization from cropped data"
+        );
+        const buildingFocusDataUrl = await this.createRgbVisualization(
           rasters,
           width,
           height,
           maskRaster,
-          null // No building boundaries for full image
+          buildingBoundaries
         );
 
-        // Create building-focused visualization if building boundaries exist
-        let buildingFocusDataUrl = fullImageDataUrl; // Default to full image
-        if (buildingBoundaries?.hasBuilding) {
-          console.log(
-            "[RgbVisualizer] Creating building-focused visualization"
-          );
-          buildingFocusDataUrl = await this.createRgbVisualization(
-            rasters,
-            width,
-            height,
-            maskRaster,
-            buildingBoundaries
-          );
-        }
+        // For full image, we would need the original uncropped data
+        // Since we only have cropped data, use the same visualization for both
+        const fullImageDataUrl = buildingFocusDataUrl;
 
         console.log("[RgbVisualizer] RGB visualization complete");
         return {
@@ -100,7 +98,7 @@ class RgbVisualizer extends Visualizer {
   }
 
   /**
-   * Create RGB visualization with specified settings
+   * Create RGB visualization from already-processed (cropped) data
    * @private
    */
   async createRgbVisualization(
@@ -110,84 +108,42 @@ class RgbVisualizer extends Visualizer {
     maskRaster,
     buildingBoundaries
   ) {
-    // Determine if we're doing building-focused visualization
-    const buildingFocus = !!buildingBoundaries?.hasBuilding;
+    console.log(
+      `[RgbVisualizer] Creating RGB visualization: ${width}x${height}`
+    );
 
-    // Determine dimensions and source data
-    let outputWidth, outputHeight, startX, startY;
-    let redRaster, greenRaster, blueRaster;
+    // The rasters are already cropped to the building, so we use them directly
+    const redRaster = rasters[0];
+    const greenRaster = rasters[1];
+    const blueRaster = rasters[2];
 
-    if (buildingFocus) {
-      // Use building boundaries for cropping
-      const { minX, minY, width: bWidth, height: bHeight } = buildingBoundaries;
-
-      startX = minX;
-      startY = minY;
-      outputWidth = bWidth;
-      outputHeight = bHeight;
-
-      console.log(
-        `[RgbVisualizer] Building size: ${outputWidth}x${outputHeight}`
-      );
-
-      // Create cropped rasters for each channel
-      redRaster = new Array(outputWidth * outputHeight);
-      greenRaster = new Array(outputWidth * outputHeight);
-      blueRaster = new Array(outputWidth * outputHeight);
-
-      for (let y = 0; y < outputHeight; y++) {
-        for (let x = 0; x < outputWidth; x++) {
-          const srcIdx = (startY + y) * width + (startX + x);
-          const destIdx = y * outputWidth + x;
-
-          redRaster[destIdx] = rasters[0][srcIdx];
-          greenRaster[destIdx] = rasters[1][srcIdx];
-          blueRaster[destIdx] = rasters[2][srcIdx];
-        }
-      }
-    } else {
-      // Use full image
-      startX = 0;
-      startY = 0;
-      outputWidth = width;
-      outputHeight = height;
-
-      redRaster = rasters[0];
-      greenRaster = rasters[1];
-      blueRaster = rasters[2];
-    }
-
-    // Create mask array for cropping if needed
-    let croppedMaskRaster = null;
-    if (maskRaster && buildingFocus) {
-      croppedMaskRaster = new Array(outputWidth * outputHeight);
-      for (let y = 0; y < outputHeight; y++) {
-        for (let x = 0; x < outputWidth; x++) {
-          const srcIdx = (startY + y) * width + (startX + x);
-          const destIdx = y * outputWidth + x;
-          croppedMaskRaster[destIdx] = maskRaster[srcIdx];
-        }
-      }
-    }
-
-    // Create canvas with exact output dimensions
-    const { canvas, ctx } = this.createEmptyCanvas(outputWidth, outputHeight);
-    const imageData = ctx.createImageData(outputWidth, outputHeight);
+    // Create canvas with the provided dimensions
+    const { canvas, ctx } = this.createEmptyCanvas(width, height);
+    const imageData = ctx.createImageData(width, height);
 
     // Fill the image data with RGB values
-    for (let y = 0; y < outputHeight; y++) {
-      for (let x = 0; x < outputWidth; x++) {
-        const srcIdx = y * outputWidth + x;
-        const destIdx = (y * outputWidth + x) * 4;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const pixelIdx = y * width + x;
+        const destIdx = pixelIdx * 4;
 
-        // Apply mask if available
-        const useMask = buildingFocus && croppedMaskRaster;
-        const isMasked = useMask && croppedMaskRaster[srcIdx] > 0;
+        // Check if we should apply mask transparency
+        const useMask = !!maskRaster;
+        const isMasked = useMask ? maskRaster[pixelIdx] > 0 : true;
 
-        // Set RGB values
-        imageData.data[destIdx] = redRaster[srcIdx]; // Red
-        imageData.data[destIdx + 1] = greenRaster[srcIdx]; // Green
-        imageData.data[destIdx + 2] = blueRaster[srcIdx]; // Blue
+        // Set RGB values (ensure they're in 0-255 range)
+        imageData.data[destIdx] = Math.max(
+          0,
+          Math.min(255, redRaster[pixelIdx] || 0)
+        );
+        imageData.data[destIdx + 1] = Math.max(
+          0,
+          Math.min(255, greenRaster[pixelIdx] || 0)
+        );
+        imageData.data[destIdx + 2] = Math.max(
+          0,
+          Math.min(255, blueRaster[pixelIdx] || 0)
+        );
 
         // Set alpha (transparency)
         if (useMask) {

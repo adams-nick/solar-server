@@ -1,10 +1,15 @@
 /**
  * Combined Flux-DSM Visualizer for SolarScanner data-layers module
+ * Simplified version with only hue_shift and additive blending modes
+ * Enhanced hue_shift with exponential elevation-based darkening and local normalization
  *
- * This dedicated visualizer takes processed annual flux data and processed DSM data
- * and creates enhanced visualizations that blend both datasets.
+ * Key Features:
+ * - Exponential decay darkening: High elevations get significant darkening, low elevations minimal
+ * - Local normalization: Better consistency across roof faces with different orientations
+ * - Hue shifting: Cool colors for high elevation, warm for low elevation
+ * - Preserves flux intensity information while enhancing 3D structure
  *
- * File: src/data-layers/visualizers/combined-flux-dsm-visualizer.js
+ * File: src/data-layers/combined-visualizers/combined-flux-dsm-visualizer.js
  */
 
 const ColorPalettes = require("../utils/color-palettes");
@@ -32,7 +37,7 @@ class CombinedFluxDsmVisualizer {
   getEnhancedFluxPalette() {
     // Extended IRON palette with more granular shades for subtle flux detection
     const enhancedColors = [
-      "00000a", // Original start - very dark purple
+      "00000a",
       "080817",
       "100b23",
       "120d30",
@@ -91,10 +96,425 @@ class CombinedFluxDsmVisualizer {
       "ffe166",
       "fff0bf",
       "fffadb",
-      "fffff6", // Original end - near white
+      "fffff6",
     ];
 
     return ColorPalettes.createPalette(enhancedColors, 256);
+  }
+
+  /**
+   * Create blended canvas with simplified blending modes
+   * @param {Array} fluxRaster - Annual flux raster data
+   * @param {Array} dsmRaster - DSM raster data
+   * @param {number} width - Image width
+   * @param {number} height - Image height
+   * @param {Object} fluxRange - Flux data range {min, max}
+   * @param {Object} dsmRange - DSM data range {min, max}
+   * @param {Array} palette - Base color palette
+   * @param {Object} options - Blending options
+   * @returns {HTMLCanvasElement} - Canvas with blended visualization
+   */
+  createBlendedCanvas(
+    fluxRaster,
+    dsmRaster,
+    width,
+    height,
+    fluxRange,
+    dsmRange,
+    palette,
+    options = {}
+  ) {
+    try {
+      const blendMode = options.blendMode || "hue_shift"; // Default to hue_shift
+
+      console.log(
+        `[CombinedFluxDsmVisualizer] Using ${blendMode} blending with DSM influence: ${
+          options.dsmInfluence || 0.4
+        }`
+      );
+
+      // Route to appropriate blending method
+      switch (blendMode) {
+        case "hue_shift":
+          return this.createEnhancedHueShiftCanvas(
+            fluxRaster,
+            dsmRaster,
+            width,
+            height,
+            fluxRange,
+            dsmRange,
+            palette,
+            options
+          );
+
+        case "additive":
+          return this.createAdditiveCanvas(
+            fluxRaster,
+            dsmRaster,
+            width,
+            height,
+            fluxRange,
+            dsmRange,
+            palette,
+            options
+          );
+
+        default:
+          // Default to enhanced hue shift
+          return this.createEnhancedHueShiftCanvas(
+            fluxRaster,
+            dsmRaster,
+            width,
+            height,
+            fluxRange,
+            dsmRange,
+            palette,
+            options
+          );
+      }
+    } catch (error) {
+      console.error(
+        `[CombinedFluxDsmVisualizer] Error creating blended canvas: ${error.message}`
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * ENHANCED HUE SHIFT WITH EXPONENTIAL ELEVATION-BASED DARKENING
+   * Shifts hue based on elevation and darkens higher elevation areas with exponential decay
+   * Low elevation = warm (red/orange), High elevation = cool (blue/cyan) + darker
+   */
+  createEnhancedHueShiftCanvas(
+    fluxRaster,
+    dsmRaster,
+    width,
+    height,
+    fluxRange,
+    dsmRange,
+    palette,
+    options = {}
+  ) {
+    const { createCanvas } = require("canvas");
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext("2d");
+    const imageData = ctx.createImageData(width, height);
+
+    const dsmInfluence = options.dsmInfluence || 0.4;
+    const darkeningStrength = options.darkeningStrength || 0.4; // How much to darken high elevations
+    const exponentialFactor = options.exponentialFactor || 2.5; // Controls exponential decay (higher = more aggressive decay)
+    const normalizationMode = options.normalizationMode || "local"; // "global" or "local"
+
+    // Helper function to convert RGB to HSL
+    function rgbToHsl(r, g, b) {
+      r /= 255;
+      g /= 255;
+      b /= 255;
+      const max = Math.max(r, g, b),
+        min = Math.min(r, g, b);
+      let h,
+        s,
+        l = (max + min) / 2;
+
+      if (max === min) {
+        h = s = 0;
+      } else {
+        const d = max - min;
+        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+        switch (max) {
+          case r:
+            h = (g - b) / d + (g < b ? 6 : 0);
+            break;
+          case g:
+            h = (b - r) / d + 2;
+            break;
+          case b:
+            h = (r - g) / d + 4;
+            break;
+        }
+        h /= 6;
+      }
+      return [h, s, l];
+    }
+
+    // Helper function to convert HSL to RGB
+    function hslToRgb(h, s, l) {
+      let r, g, b;
+      if (s === 0) {
+        r = g = b = l;
+      } else {
+        const hue2rgb = (p, q, t) => {
+          if (t < 0) t += 1;
+          if (t > 1) t -= 1;
+          if (t < 1 / 6) return p + (q - p) * 6 * t;
+          if (t < 1 / 2) return q;
+          if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+          return p;
+        };
+        const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        const p = 2 * l - q;
+        r = hue2rgb(p, q, h + 1 / 3);
+        g = hue2rgb(p, q, h);
+        b = hue2rgb(p, q, h - 1 / 3);
+      }
+      return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+    }
+
+    // Calculate local DSM statistics for better normalization if requested
+    let localDsmStats = null;
+    if (normalizationMode === "local") {
+      // Calculate statistics more efficiently to avoid stack overflow
+      let localMin = Infinity;
+      let localMax = -Infinity;
+      let validCount = 0;
+      let sum = 0;
+
+      // Single pass through the data to calculate statistics
+      for (let i = 0; i < dsmRaster.length; i++) {
+        const value = dsmRaster[i];
+        if (
+          value !== config.processing.NO_DATA_VALUE &&
+          !isNaN(value) &&
+          value !== null &&
+          value !== undefined
+        ) {
+          localMin = Math.min(localMin, value);
+          localMax = Math.max(localMax, value);
+          sum += value;
+          validCount++;
+        }
+      }
+
+      if (validCount > 0 && localMax > localMin) {
+        const localRange = localMax - localMin;
+
+        localDsmStats = {
+          min: localMin,
+          max: localMax,
+          range: localRange,
+          mean: sum / validCount,
+        };
+
+        console.log(
+          `[CombinedFluxDsmVisualizer] Local DSM stats: min=${localMin.toFixed(
+            2
+          )}, max=${localMax.toFixed(2)}, range=${localRange.toFixed(
+            2
+          )}, validPixels=${validCount}`
+        );
+      } else {
+        console.log(
+          `[CombinedFluxDsmVisualizer] Warning: Local DSM normalization failed, falling back to global. ValidCount=${validCount}, range=${
+            localMax - localMin
+          }`
+        );
+      }
+    }
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const index = y * width + x;
+        const pixelIndex = index * 4;
+
+        const fluxValue = fluxRaster[index];
+        const dsmValue = dsmRaster[index];
+
+        if (
+          fluxValue === config.processing.NO_DATA_VALUE ||
+          isNaN(fluxValue) ||
+          fluxValue === null ||
+          fluxValue === undefined
+        ) {
+          imageData.data[pixelIndex] = 0;
+          imageData.data[pixelIndex + 1] = 0;
+          imageData.data[pixelIndex + 2] = 0;
+          imageData.data[pixelIndex + 3] = options.useAlpha ? 0 : 255;
+          continue;
+        }
+
+        const normalizedFlux = Math.max(
+          0,
+          Math.min(
+            1,
+            (fluxValue - fluxRange.min) / (fluxRange.max - fluxRange.min)
+          )
+        );
+        const colorIndex = Math.floor(normalizedFlux * (palette.length - 1));
+        const baseColor = palette[colorIndex];
+
+        let finalColor = { ...baseColor };
+
+        if (
+          dsmValue !== config.processing.NO_DATA_VALUE &&
+          !isNaN(dsmValue) &&
+          dsmValue !== null &&
+          dsmValue !== undefined
+        ) {
+          // Normalize DSM value using local or global range
+          let normalizedDsm = 0;
+
+          if (localDsmStats && localDsmStats.range > 0.01) {
+            // Minimum range threshold
+            // Use local normalization for better consistency across roof faces
+            normalizedDsm = Math.max(
+              0,
+              Math.min(1, (dsmValue - localDsmStats.min) / localDsmStats.range)
+            );
+          } else {
+            // Fallback to global normalization
+            const globalRange = dsmRange.max - dsmRange.min;
+            if (globalRange > 0.01) {
+              normalizedDsm = Math.max(
+                0,
+                Math.min(1, (dsmValue - dsmRange.min) / globalRange)
+              );
+            } else {
+              // If both ranges are too small, use a default moderate value
+              normalizedDsm = 0.5;
+            }
+          }
+
+          // Convert to HSL
+          const [h, s, l] = rgbToHsl(baseColor.r, baseColor.g, baseColor.b);
+
+          // Shift hue based on elevation (more subtle for local normalization)
+          const hueShiftAmount = normalizationMode === "local" ? 0.25 : 0.4;
+          const hueShift = normalizedDsm * dsmInfluence * hueShiftAmount;
+          const newHue = (h + hueShift) % 1;
+
+          // EXPONENTIAL DECAY DARKENING: High elevation gets significant darkening,
+          // but as elevation drops, the darkening effect diminishes exponentially
+          const exponentialDarkening = Math.pow(
+            normalizedDsm,
+            exponentialFactor
+          );
+          const darkeningFactor = Math.max(
+            0.1,
+            1 - exponentialDarkening * darkeningStrength
+          ); // Prevent over-darkening
+
+          // Apply adaptive lightness adjustment based on the original lightness
+          // This helps maintain contrast across different flux intensities
+          const adaptiveLightness = Math.max(
+            0,
+            Math.min(1, l * darkeningFactor)
+          );
+
+          // Optional: Add slight saturation boost for higher elevations to enhance the effect
+          const saturationBoost =
+            normalizationMode === "local" ? 1 + normalizedDsm * 0.1 : 1;
+          const newSaturation = Math.min(1, Math.max(0, s * saturationBoost));
+
+          // Convert back to RGB with modified hue, saturation, and lightness
+          const [newR, newG, newB] = hslToRgb(
+            newHue,
+            newSaturation,
+            adaptiveLightness
+          );
+          finalColor = {
+            r: Math.max(0, Math.min(255, newR)),
+            g: Math.max(0, Math.min(255, newG)),
+            b: Math.max(0, Math.min(255, newB)),
+          };
+        }
+
+        imageData.data[pixelIndex] = finalColor.r;
+        imageData.data[pixelIndex + 1] = finalColor.g;
+        imageData.data[pixelIndex + 2] = finalColor.b;
+        imageData.data[pixelIndex + 3] = 255;
+      }
+    }
+
+    ctx.putImageData(imageData, 0, 0);
+    return canvas;
+  }
+
+  /**
+   * ADDITIVE BLENDING
+   * Simple additive blending for compatibility
+   */
+  createAdditiveCanvas(
+    fluxRaster,
+    dsmRaster,
+    width,
+    height,
+    fluxRange,
+    dsmRange,
+    palette,
+    options = {}
+  ) {
+    const { createCanvas } = require("canvas");
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext("2d");
+    const imageData = ctx.createImageData(width, height);
+
+    const dsmInfluence = options.dsmInfluence || 0.35;
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const index = y * width + x;
+        const pixelIndex = index * 4;
+
+        const fluxValue = fluxRaster[index];
+        const dsmValue = dsmRaster[index];
+
+        if (
+          fluxValue === config.processing.NO_DATA_VALUE ||
+          isNaN(fluxValue) ||
+          fluxValue === null ||
+          fluxValue === undefined
+        ) {
+          imageData.data[pixelIndex] = 0;
+          imageData.data[pixelIndex + 1] = 0;
+          imageData.data[pixelIndex + 2] = 0;
+          imageData.data[pixelIndex + 3] = options.useAlpha ? 0 : 255;
+          continue;
+        }
+
+        const normalizedFlux = Math.max(
+          0,
+          Math.min(
+            1,
+            (fluxValue - fluxRange.min) / (fluxRange.max - fluxRange.min)
+          )
+        );
+        const colorIndex = Math.floor(normalizedFlux * (palette.length - 1));
+        const baseColor = palette[colorIndex];
+
+        let finalColor = { ...baseColor };
+
+        if (
+          dsmValue !== config.processing.NO_DATA_VALUE &&
+          !isNaN(dsmValue) &&
+          dsmValue !== null &&
+          dsmValue !== undefined
+        ) {
+          const normalizedDsm = Math.max(
+            0,
+            Math.min(
+              1,
+              (dsmValue - dsmRange.min) / (dsmRange.max - dsmRange.min)
+            )
+          );
+
+          // Additive blending - brighten based on elevation
+          const intensity = 1.0 + normalizedDsm * dsmInfluence;
+          finalColor = {
+            r: Math.min(255, Math.round(baseColor.r * intensity)),
+            g: Math.min(255, Math.round(baseColor.g * intensity)),
+            b: Math.min(255, Math.round(baseColor.b * intensity)),
+          };
+        }
+
+        imageData.data[pixelIndex] = finalColor.r;
+        imageData.data[pixelIndex + 1] = finalColor.g;
+        imageData.data[pixelIndex + 2] = finalColor.b;
+        imageData.data[pixelIndex + 3] = 255;
+      }
+    }
+
+    ctx.putImageData(imageData, 0, 0);
+    return canvas;
   }
 
   /**
@@ -102,11 +522,6 @@ class CombinedFluxDsmVisualizer {
    * @param {Object} fluxProcessedData - Processed annual flux data
    * @param {Object} dsmProcessedData - Processed DSM data
    * @param {Object} options - Visualization options
-   * @param {string} [options.blendMode='additive'] - Blending mode (additive, multiply, overlay, elevation_highlight)
-   * @param {number} [options.dsmInfluence=0.35] - How much DSM affects the result (0-1)
-   * @param {boolean} [options.buildingFocus=true] - Whether to focus on building area
-   * @param {Array<Object>} [options.palette] - Custom color palette
-   * @param {string} [options.paletteName='IRON'] - Name of predefined palette
    * @returns {Promise<Object>} - Blended visualization URLs
    */
   async createBlendedVisualization(
@@ -116,7 +531,7 @@ class CombinedFluxDsmVisualizer {
   ) {
     try {
       console.log(
-        "[CombinedFluxDsmVisualizer] Creating blended flux+DSM visualization"
+        "[CombinedFluxDsmVisualizer] Creating enhanced hue-shift blended flux+DSM visualization"
       );
 
       // Validate input data
@@ -150,13 +565,15 @@ class CombinedFluxDsmVisualizer {
         console.warn(
           `[CombinedFluxDsmVisualizer] Dimension mismatch: flux(${width}x${height}) vs dsm(${dsmWidth}x${dsmHeight})`
         );
-        // We could resample here, but for simplicity, we'll throw an error
         throw new Error(`Dimension mismatch between flux and DSM data`);
       }
 
-      // Set visualization options
-      const blendMode = options.blendMode || "additive";
-      const dsmInfluence = options.dsmInfluence || 0.35;
+      // Set visualization options - Default to hue_shift with exponential darkening
+      const blendMode = options.blendMode || "hue_shift";
+      const dsmInfluence = options.dsmInfluence || 0.4;
+      const darkeningStrength = options.darkeningStrength || 0.4;
+      const exponentialFactor = options.exponentialFactor || 2.5; // Higher = more aggressive decay
+      const normalizationMode = options.normalizationMode || "local"; // "local" or "global"
       const buildingFocus = options.buildingFocus !== false;
 
       // Get color palette
@@ -191,10 +608,10 @@ class CombinedFluxDsmVisualizer {
       };
 
       console.log(
-        `[CombinedFluxDsmVisualizer] Using flux range: ${fluxRange.min}-${fluxRange.max}, DSM range: ${dsmRange.min}-${dsmRange.max}`
+        `[CombinedFluxDsmVisualizer] Using ${blendMode} blending: flux(${fluxRange.min}-${fluxRange.max}), DSM(${dsmRange.min}-${dsmRange.max}), darkening: ${darkeningStrength}, exponential: ${exponentialFactor}, normalization: ${normalizationMode}`
       );
 
-      // Create blended visualization
+      // Create enhanced blended visualization
       const blendedCanvas = this.createBlendedCanvas(
         fluxRaster,
         dsmRaster,
@@ -206,6 +623,9 @@ class CombinedFluxDsmVisualizer {
         {
           blendMode,
           dsmInfluence,
+          darkeningStrength,
+          exponentialFactor,
+          normalizationMode,
           useAlpha: buildingFocus,
         }
       );
@@ -238,16 +658,25 @@ class CombinedFluxDsmVisualizer {
         }
       );
 
-      console.log("[CombinedFluxDsmVisualizer] Blended visualization complete");
+      console.log(
+        "[CombinedFluxDsmVisualizer] Enhanced hue-shift blended visualization complete"
+      );
 
       return {
-        buildingFocus: blendedDataUrl, // Enhanced with DSM blending
+        buildingFocus: blendedDataUrl, // Enhanced with hue shift and elevation darkening
         fullImage: fluxOnlyDataUrl, // Standard flux visualization for comparison
         enhanced: true,
         metadata: {
           blendMode,
           dsmInfluence,
+          darkeningStrength,
+          exponentialFactor,
+          normalizationMode,
           hasDsmBlending: true,
+          usesHueShift: blendMode === "hue_shift",
+          elevationDarkening: blendMode === "hue_shift",
+          exponentialDecay: true,
+          localNormalization: normalizationMode === "local",
           dimensions: { width, height },
           fluxRange,
           dsmRange,
@@ -255,218 +684,9 @@ class CombinedFluxDsmVisualizer {
       };
     } catch (error) {
       console.error(
-        `[CombinedFluxDsmVisualizer] Error creating blended visualization: ${error.message}`
+        `[CombinedFluxDsmVisualizer] Error creating enhanced visualization: ${error.message}`
       );
       throw error;
-    }
-  }
-
-  /**
-   * Create blended canvas combining flux and DSM data
-   * @private
-   * @param {Array} fluxRaster - Annual flux raster data
-   * @param {Array} dsmRaster - DSM raster data
-   * @param {number} width - Image width
-   * @param {number} height - Image height
-   * @param {Object} fluxRange - Flux data range {min, max}
-   * @param {Object} dsmRange - DSM data range {min, max}
-   * @param {Array} palette - Base color palette
-   * @param {Object} options - Blending options
-   * @returns {HTMLCanvasElement} - Canvas with blended visualization
-   */
-  createBlendedCanvas(
-    fluxRaster,
-    dsmRaster,
-    width,
-    height,
-    fluxRange,
-    dsmRange,
-    palette,
-    options = {}
-  ) {
-    try {
-      // Create canvas using Node.js canvas (not VisualizationUtils.createCanvas)
-      const { createCanvas } = require("canvas");
-      const canvas = createCanvas(width, height);
-      const ctx = canvas.getContext("2d");
-      const imageData = ctx.createImageData(width, height);
-
-      // Blending parameters
-      const blendMode = options.blendMode || "additive";
-      const dsmInfluence = options.dsmInfluence || 0.35;
-
-      console.log(
-        `[CombinedFluxDsmVisualizer] Using ${blendMode} blending with DSM influence: ${dsmInfluence}`
-      );
-
-      // Process each pixel
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const index = y * width + x;
-          const pixelIndex = index * 4;
-
-          const fluxValue = fluxRaster[index];
-          const dsmValue = dsmRaster[index];
-
-          // Check for no-data values
-          const hasValidFlux =
-            fluxValue !== config.processing.NO_DATA_VALUE &&
-            !isNaN(fluxValue) &&
-            fluxValue !== null &&
-            fluxValue !== undefined;
-
-          const hasValidDsm =
-            dsmValue !== config.processing.NO_DATA_VALUE &&
-            !isNaN(dsmValue) &&
-            dsmValue !== null &&
-            dsmValue !== undefined;
-
-          if (!hasValidFlux) {
-            // No flux data - make transparent
-            imageData.data[pixelIndex] = 0;
-            imageData.data[pixelIndex + 1] = 0;
-            imageData.data[pixelIndex + 2] = 0;
-            imageData.data[pixelIndex + 3] = options.useAlpha ? 0 : 255;
-            continue;
-          }
-
-          // Normalize flux value to 0-1
-          const normalizedFlux = Math.max(
-            0,
-            Math.min(
-              1,
-              (fluxValue - fluxRange.min) / (fluxRange.max - fluxRange.min)
-            )
-          );
-
-          // Get base color from flux data
-          const colorIndex = Math.floor(normalizedFlux * (palette.length - 1));
-          const baseColor = palette[colorIndex];
-
-          let finalColor = { ...baseColor };
-
-          // Apply DSM blending if available
-          if (hasValidDsm) {
-            // Normalize DSM value to 0-1
-            const normalizedDsm = Math.max(
-              0,
-              Math.min(
-                1,
-                (dsmValue - dsmRange.min) / (dsmRange.max - dsmRange.min)
-              )
-            );
-
-            // Apply blending based on mode
-            finalColor = this.applyBlending(
-              baseColor,
-              normalizedDsm,
-              blendMode,
-              dsmInfluence
-            );
-          }
-
-          // Set pixel color
-          imageData.data[pixelIndex] = finalColor.r;
-          imageData.data[pixelIndex + 1] = finalColor.g;
-          imageData.data[pixelIndex + 2] = finalColor.b;
-          imageData.data[pixelIndex + 3] = 255; // Fully opaque
-        }
-      }
-
-      // Put image data on canvas
-      ctx.putImageData(imageData, 0, 0);
-
-      return canvas;
-    } catch (error) {
-      console.error(
-        `[CombinedFluxDsmVisualizer] Error creating blended canvas: ${error.message}`
-      );
-      throw error;
-    }
-  }
-
-  /**
-   * Apply blending between base color and DSM value
-   * @private
-   * @param {Object} baseColor - Base color from flux {r, g, b}
-   * @param {number} normalizedDsm - Normalized DSM value (0-1)
-   * @param {string} blendMode - Blending mode
-   * @param {number} dsmInfluence - DSM influence (0-1)
-   * @returns {Object} - Final blended color {r, g, b}
-   */
-  applyBlending(baseColor, normalizedDsm, blendMode, dsmInfluence) {
-    switch (blendMode) {
-      case "additive":
-        // DSM adds brightness/intensity to flux colors
-        const intensity = 1.0 + normalizedDsm * dsmInfluence;
-        return {
-          r: Math.min(255, Math.round(baseColor.r * intensity)),
-          g: Math.min(255, Math.round(baseColor.g * intensity)),
-          b: Math.min(255, Math.round(baseColor.b * intensity)),
-        };
-
-      case "multiply":
-        // DSM modulates flux colors multiplicatively
-        const dsmFactor = normalizedDsm * dsmInfluence + (1.0 - dsmInfluence);
-        return {
-          r: Math.round(baseColor.r * dsmFactor),
-          g: Math.round(baseColor.g * dsmFactor),
-          b: Math.round(baseColor.b * dsmFactor),
-        };
-
-      case "overlay":
-        // Complex blending that preserves both flux and elevation info
-        const overlayBlend = (base, overlay) => {
-          base = base / 255;
-          overlay = overlay / 255;
-          const result =
-            base < 0.5
-              ? 2 * base * overlay
-              : 1 - 2 * (1 - base) * (1 - overlay);
-          return Math.round(result * 255);
-        };
-
-        const overlayValue = normalizedDsm * 255;
-        return {
-          r: overlayBlend(
-            baseColor.r,
-            overlayValue * dsmInfluence + baseColor.r * (1 - dsmInfluence)
-          ),
-          g: overlayBlend(
-            baseColor.g,
-            overlayValue * dsmInfluence + baseColor.g * (1 - dsmInfluence)
-          ),
-          b: overlayBlend(
-            baseColor.b,
-            overlayValue * dsmInfluence + baseColor.b * (1 - dsmInfluence)
-          ),
-        };
-
-      case "elevation_highlight":
-        // Highlight high elevation areas with warmer tones
-        const elevationBoost = normalizedDsm * dsmInfluence;
-        return {
-          r: Math.min(255, Math.round(baseColor.r + elevationBoost * 100)),
-          g: Math.round(baseColor.g + elevationBoost * 50),
-          b: Math.max(0, Math.round(baseColor.b - elevationBoost * 30)),
-        };
-
-      default:
-        // Default to additive
-        return {
-          r: Math.min(
-            255,
-            Math.round(baseColor.r * (1.0 + normalizedDsm * dsmInfluence))
-          ),
-          g: Math.min(
-            255,
-            Math.round(baseColor.g * (1.0 + normalizedDsm * dsmInfluence))
-          ),
-          b: Math.min(
-            255,
-            Math.round(baseColor.b * (1.0 + normalizedDsm * dsmInfluence))
-          ),
-        };
     }
   }
 

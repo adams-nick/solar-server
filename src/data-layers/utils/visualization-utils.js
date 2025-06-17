@@ -175,6 +175,33 @@ class VisualizationUtils {
         `[VisualizationUtils] Found ${connectedPixels.length} connected building pixels`
       );
 
+      // NEW: Filter out disconnected building pixels from the mask
+      console.log(
+        "[VisualizationUtils] Filtering disconnected building pixels from mask"
+      );
+
+      // Create a Set for fast lookup of connected pixel indices
+      const connectedIndices = new Set();
+      for (const pixel of connectedPixels) {
+        connectedIndices.add(pixel.y * width + pixel.x);
+      }
+
+      // Count disconnected pixels before filtering
+      let disconnectedCount = 0;
+
+      // Filter the mask: keep only connected building pixels and all non-building pixels
+      for (let i = 0; i < maskData.length; i++) {
+        // If this is a building pixel (above threshold) but not connected to target building
+        if (maskData[i] > threshold && !connectedIndices.has(i)) {
+          maskData[i] = 0; // Remove disconnected building pixel
+          disconnectedCount++;
+        }
+      }
+
+      console.log(
+        `[VisualizationUtils] Removed ${disconnectedCount} disconnected building pixels from mask`
+      );
+
       // Find bounding box of connected pixels
       let minX = width;
       let maxX = 0;
@@ -208,6 +235,7 @@ class VisualizationUtils {
         hasBuilding: true,
         targetBuilding: true,
         connectedPixelCount: connectedPixels.length,
+        disconnectedPixelsRemoved: disconnectedCount,
       };
     } catch (error) {
       console.error(

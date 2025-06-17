@@ -26,6 +26,10 @@ const solarPanelAnalysis = require("../../utils/solarPanelAnalysis");
 // ML server URL - should be configurable via environment variable
 const ML_SERVER_URL = process.env.ML_SERVER_URL || "http://localhost:8000";
 
+// Global configuration for DSM blending
+const DSM_BLEND_MODE = "hue_shift";
+const DSM_INFLUENCE = 0.2;
+
 // Create API client for the data layer manager
 const apiClient = {
   apiKey: process.env.GOOGLE_MAPS_API_KEY,
@@ -2411,8 +2415,8 @@ async function createCombinedFluxDsmVisualization(annualFluxResult, dsmResult) {
       fluxProcessedData,
       dsmProcessedData,
       {
-        blendMode: "additive",
-        dsmInfluence: 0.35,
+        blendMode: DSM_BLEND_MODE, // Use global constant
+        dsmInfluence: DSM_INFLUENCE, // Use global constant
         buildingFocus: true,
         paletteName: "IRON",
         quality: 0.95,
@@ -2430,8 +2434,8 @@ async function createCombinedFluxDsmVisualization(annualFluxResult, dsmResult) {
       enhanced: blendedResult.enhanced,
       metadata: blendedResult.metadata || {
         dimensions: fluxProcessedData.metadata.dimensions,
-        blendMode: "additive",
-        dsmInfluence: 0.35,
+        blendMode: DSM_BLEND_MODE, // Use global constant
+        dsmInfluence: DSM_INFLUENCE, // Use global constant
         hasDsmBlending: true,
       },
       bounds: fluxProcessedData.bounds,
@@ -2443,21 +2447,6 @@ async function createCombinedFluxDsmVisualization(annualFluxResult, dsmResult) {
       `Failed to create combined visualization: ${error.message}`
     );
   }
-}
-
-/**
- * Helper function to extract raster data from visualization result if not directly available
- * This is a placeholder - you may need to implement this based on your data structure
- * @param {Object} result - Annual flux result
- * @returns {Array} Raster data array
- */
-function extractRasterFromVisualization(result) {
-  // If raster data is not directly available, you might need to extract it
-  // from the processed data or regenerate it. This depends on your data flow.
-
-  // For now, return null and handle in the calling function
-  console.warn("Raster data not directly available in annual flux result");
-  return null;
 }
 
 /**
